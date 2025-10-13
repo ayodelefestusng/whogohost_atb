@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 # import matplotlib.pyplot as plt
 # # ==========================
-# import pandas as pd
+import pandas as pd
 from django.conf import settings
 
 # # ==========================
