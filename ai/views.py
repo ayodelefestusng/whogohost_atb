@@ -8,6 +8,109 @@ import logging
 
 @csrf_exempt
 def chatbot(request):
+    if request.method != 'POST':
+        return JsonResponse({'status': 'error', 'response': 'Invalid request method'}, status=405)
+
+    # 1. Extract Data
+    user_message = request.POST.get('message', '').strip()
+    session_key = request.POST.get('session_key', '').strip()
+    attachment = request.FILES.get('attachment', None) 
+
+    # Corrected spellings in the request extraction to match the rest of your code
+    tenant_id = request.POST.get('tenamt_id', '').strip() 
+    tenant_name = request.POST.get('tenamt_name', '').strip()
+
+    tenant_kss_file = request.FILES.get('tenant_profile', None) 
+    chatbot_greeting = request.POST.get('greeting_prompt', None) 
+    agent_node_prompt = request.POST.get('agent_node_prompt', None)
+    final_answer_prompt = request.POST.get('final_ouput_prompt', None)
+    summary_prompt = request.POST.get('summary_prompt', None)
+    tenant_description = request.POST.get('additional_note', None) 
+
+    # 2. Validation
+    if not tenant_id or not tenant_name: # Use 'or' for simple check
+        return JsonResponse({'status': 'error', 'response': 'Tenant ID and name are required'}, status=400)
+
+    if not user_message and not attachment:
+        return JsonResponse({'status': 'error', 'response': 'Message or attachment is required'}, status=400)
+
+    if not session_key:
+        return JsonResponse({'status': 'error', 'response': 'Session key is required'}, status=400)
+    
+    
+    # 3. Tenant Management (Refactored to save/update and continue)
+    tenant, created = Tenant.objects.get_or_create(tenant_id=tenant_id)
+    tenant.tenant_name = tenant_name
+
+    if tenant_kss_file:
+        # Assuming the field on the model is named 'tenant_kss'
+        # NOTE: Your model field should be a TextField if you are doing .read().decode()
+        try:
+            tenant.tenant_kss = tenant_kss_file.read().decode('utf-8') 
+        except Exception as e:
+            logging.error(f"Failed to read tenant_kss file: {e}")
+            return JsonResponse({'status': 'error', 'response': 'Error processing tenant KSS file'}, status=400)
+
+    # Update other fields if they exist in the request
+    if chatbot_greeting:
+        tenant.chatbot_greeting = chatbot_greeting
+    if agent_node_prompt:
+        tenant.agent_node_prompt = agent_node_prompt
+    if final_answer_prompt:
+        tenant.final_answer_prompt = final_answer_prompt
+    if summary_prompt:
+        tenant.summary_prompt = summary_prompt
+    if tenant_description:
+        tenant.tenant_description = tenant_description 
+
+    # Save all updates to the Tenant object
+    tenant.save() 
+    
+    # 4. Conversation & Message Creation
+    conversation, _ = Conversation.objects.get_or_create(session_id=session_key, is_active=True)
+
+    # Create user message
+    user_msg_obj = Message.objects.create(
+        conversation=conversation,
+        text=user_message,
+        is_user=True
+    )
+
+    # 5. Attachment Handling
+    file_path = ""
+    if attachment:
+        user_msg_obj.attachment = attachment
+        user_msg_obj.save()
+        try:
+            file_path = user_msg_obj.attachment.path
+        except Exception as e:
+            logging.warning(f"Could not resolve attachment path: {e}")
+            file_path = ""
+
+    # 6. Call Chatbot Processor
+    try:
+        # Passed tenant_id to process_message
+        bot_response_data = process_message(user_message, session_key, tenant_id, file_path)
+        bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
+    except Exception as e:
+        bot_metadata = f"Error processing message: {str(e)}"
+        logging.error(f"process_message failed: {e}")
+
+    # 7. Craft and Return Response
+    response_payload = {
+        'status': 'success',
+        'response': bot_metadata,
+        'attachment_url': user_msg_obj.attachment.url if attachment else None
+    }
+
+    logging.info(f"Bot response: {bot_metadata}")
+    return JsonResponse(response_payload)
+
+
+
+
+@csrf_exempt
+def chatbot1(request):
     # if request.method != 'POST':
     #     return JsonResponse({'status': 'error', 'response': 'Invalid request method'}, status=405)
 
@@ -116,3 +219,4 @@ def chatbot(request):
 
     logging.info(f"Bot response: {bot_metadata}")
     return JsonResponse(response_payload)
+

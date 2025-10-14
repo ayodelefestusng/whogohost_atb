@@ -1,7 +1,7 @@
 # myproject/myapp/urls.py
 from django.urls import path
 
-from .views import *
+from .views import chatbot,chatbot1
 
 app_name = 'ai'  # ✅ This defines the namespace
 
@@ -76,7 +76,8 @@ urlpatterns = [
 
     # --- NEW API ENDPOINTS ---
     # Processes text from URL path and returns JSON
-    path('chatbot/', chatbot, name='chatbot'),
+    path('', chatbot, name='chatbot'),
+    path('chatbot/', chatbot1, name='chatbot1'),
     # Translates text from URL path and returns JSON
     # path('word_translate/', word_translate, name='word_translate'),
     # --- END NEW API ENDPOINTS ---

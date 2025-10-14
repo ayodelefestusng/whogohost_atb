@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 # import matplotlib.pyplot as plt
 # # ==========================
-import pandas as pd
+# import pandas as pd
 from django.conf import settings
 
 # # ==========================
@@ -252,7 +252,7 @@ class SQLQueryInput(BaseModel):
 #     """Input schema for the generate_visualization_tool."""
 #     query: str = Field(description="The user's natural language request for a chart or visualization, e.g., 'Plot the total sales by region'.")
 
-class State(MessagesState):
+class State1(MessagesState):
     """Manages the conversation state. Uses Pydantic models for structured data."""
     # Tool outputs
     pdf_content: Optional[str] = None
@@ -270,6 +270,25 @@ class State(MessagesState):
     # For final logging
     metadatas: Optional[Dict[str, Any]] = None
     tenant_config: Optional[Dict[str, Any]] = Field(default=None) # <-- NEW
+class State(MessagesState):
+    """Manages the conversation state. Uses Pydantic models for structured data."""
+    # Tool outputs
+    pdf_content: Optional[str] 
+    web_content: Optional[str] 
+    sql_result: Optional[str]
+    # visualization_result: Optional[Dict[str, Any]] = None # <-- NEW
+
+    attached_content: Optional[str]
+    last_tool_name: Optional[str] 
+
+    # Final structured outputs
+    final_answer: Optional[Answer]
+    conversation_summary: Optional[Summary]
+
+    # For final logging
+    metadatas: Optional[Dict[str, Any]] 
+    tenant_config: Optional[Dict[str, Any]] # <-- NEW
+    # tools_list: Optional[List[Tool]] 
 
 # ==========================
 # 🛠️ Tools
@@ -354,13 +373,15 @@ def update_state_after_tool_call(state: State) -> dict:
 
     return {}
 
-def agent_node(state: State):
+def agent_node2(state: State):
     """
     The Router Node: Decides whether to call a tool or generate a final answer.
     """
     print("--- AGENT NODE (ROUTER) ---")
     messages = state["messages"]
     tenant_config = state["tenant_config"] 
+    # 🚨 CORRECTION 3: GET tools_list FROM STATE
+    tools_for_llm = state.get("tools_list", []) 
 
     if len(messages) == 1:
         # 🚨 FIX: Handle initial message/greeting turn
@@ -375,7 +396,7 @@ def agent_node(state: State):
     # or rely on the LangGraph engine's tool setup if it handles it implicitly.
     # For safety, we use only the available global tool for LLM binding.
     # Note: LangGraph's ToolNode handles execution, the LLM just needs the definition.
-    tools_for_llm = [tavily_search_tool] 
+    # tools_for_llm = [tavily_search_tool] 
     # Assuming pdf_retrieval_tool is not globally defined, we rely on LangGraph's setup 
     # which takes the tools_list from the build_graph call. 
     
@@ -384,6 +405,42 @@ def agent_node(state: State):
     )
     
     # We bind the globally available tool, knowing the graph's ToolNode will use the full, bound list.
+    llm_with_tools = llm.bind_tools(tools_for_llm) 
+    response = llm_with_tools.invoke([system_prompt] + messages)
+    
+    last_tool_name = None
+    if response.tool_calls:
+        last_tool_name = response.tool_calls[0]['name']
+        print(f"LLM decided to call tool: {last_tool_name}")
+        
+    return {"messages": [response], "last_tool_name": last_tool_name}
+
+
+# ==========================
+# 🛠️ agent_node function (FIXED)
+# ==========================
+# 🚨 FIX 2: Agent node now accepts the tools list directly as an argument.
+def agent_node(state: State, tools_for_llm: List[Tool]): 
+    """
+    The Router Node: Decides whether to call a tool or generate a final answer.
+    """
+    print("--- AGENT NODE (ROUTER) ---")
+    messages = state["messages"]
+    tenant_config = state["tenant_config"] 
+    
+    # tools_for_llm is now available via the argument, not the state.
+
+    if len(messages) == 1:
+        # ... (greeting logic remains the same)
+        greeting = tenant_config.get("greeting", "How can I help?") 
+        new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
+        return {"messages": new_messages, "last_tool_name": "GREETING_SENT"} 
+    
+    system_prompt = SystemMessage(
+        content=tenant_config.get("agent_prompt", "You are a helpful AI assistant.")
+    )
+    
+    # 🚨 FIX 2 (cont.): Bind ALL tools from the argument list to the LLM.
     llm_with_tools = llm.bind_tools(tools_for_llm) 
     response = llm_with_tools.invoke([system_prompt] + messages)
     
@@ -534,11 +591,13 @@ def should_continue(state: State) -> str:
 # 🔄 Graph Workflow
 # ==========================
 
-def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
+# def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
+def build_graph(tools_list, agent_node_func): 
     """Builds and compiles the LangGraph workflow."""
     workflow = StateGraph(State)
+    workflow.add_node("agent_node", agent_node_func)
     
-    workflow.add_node("agent_node", agent_node)
+    # workflow.add_node("agent_node", agent_node)
     workflow.add_node("tools", ToolNode(tools=tools_list)) # 🚨 FIX: Uses the dynamic list
     workflow.add_node("update_state", update_state_after_tool_call)
 
@@ -583,7 +642,10 @@ def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
     return workflow.compile(checkpointer=memory)
 
 # Main processing function
+# def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
+
 def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
+
     """Main function to process user messages using the LangGraph agent."""
 
     # --- DYNAMIC INITIALIZATION ---
@@ -598,18 +660,36 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
     # 🚨 FIX: Create the RAG tool binding and define the tool list here!
     # 1. Bind the vector store instance to the retrieval function
     pdf_retrieval_bound = partial(retrieve_from_pdf, vector_store=tenant_vector_store)
+        # 1. Bind the vector store instance to the retrieval function
+    # pdf_retrieval_bound = partial(retrieve_from_pdf, vector_store=tenant_vector_store)
 
-    # 2. Redefine the PDF tool using the bound function
+     # 2. Redefine the PDF tool using the bound function
+    # pdf_retrieval_tool_dynamic = Tool(
+    #     name="pdf_retrieval_tool",
+    #     description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
+    #     func=pdf_retrieval_bound,
+    #     args_schema=PDFRetrievalInput,
+    # )
+
+    pdf_retrieval_wrapper = lambda query: retrieve_from_pdf(
+        query=query, 
+        vector_store=tenant_vector_store
+    )
+     # 2. Redefine the PDF tool using the new wrapper function
     pdf_retrieval_tool_dynamic = Tool(
         name="pdf_retrieval_tool",
         description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
-        func=pdf_retrieval_bound,
+        func=pdf_retrieval_wrapper, # <-- Use the lambda here
         args_schema=PDFRetrievalInput,
     )
-    
     # 3. Create the final tools list to pass to the graph builder
     local_tools = [pdf_retrieval_tool_dynamic, tavily_search_tool]
-    graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
+     # 🚨 FIX 4A: Bind the tools list to the agent_node function
+    bound_agent_node = partial(agent_node, tools_for_llm=local_tools)
+     # 🚨 FIX 4B: Pass BOTH the tool list and the bound node to build_graph
+    graph = build_graph(local_tools, bound_agent_node) 
+
+    # graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
 
     config = {"configurable": {"thread_id": session_id}}
     
@@ -668,6 +748,7 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
             "agent_prompt": current_tenant.agent_node_prompt,
             "final_prompt": current_tenant.final_answer_prompt,
             "summary_prompt": current_tenant.summary_prompt,
+            
         }
     }
     
