@@ -127,8 +127,8 @@ def chatbot1(request):
     tenant_name = request.POST.get('tenamt_name', '').strip()
 
 
-    user_message = "Can I get a loan "
-    session_key = "12346"
+    user_message = "Can I get a loan and savings "
+    session_key = "12346877k"
     tenant_id ="1"
     tenant_name = "ATBs"
     attachment = request.FILES.get('attachment', None) 

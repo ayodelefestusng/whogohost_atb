@@ -23,6 +23,9 @@ from datetime import datetime
 from io import BytesIO
 # from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Literal, Optional
+from xml.dom.minidom import Document
+
+from langchain_core.documents import Document
 
 # import matplotlib.pyplot as plt
 # # ==========================
@@ -155,12 +158,13 @@ model = llm # Consistent naming
 # tenant = Tenant.objects.get(tenant_id=tenant_id)  # Get the existing record
 
 # Initialize Embeddings and Vector Store
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+
 # embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", transport="rest")
 # global_vector_store = None
 
 # Call the initialization function
 # initialize_vector_store()
+embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 def initialize_vector_store(tenant_id: str):
     """Initializes and connects to the Chroma vector store for a specific tenant."""
     
@@ -171,6 +175,7 @@ def initialize_vector_store(tenant_id: str):
     
     # 2. Connect to the persistent Chroma collection
     # The collection name can be static, as the directory is tenant-specific
+    
     vector_store = Chroma(
         collection_name=f"tenant_{tenant_id}_rag",
         embedding_function=embeddings, # Your chosen embedding model
@@ -244,7 +249,7 @@ class WebSearchInput(BaseModel):
 class SQLQueryInput(BaseModel):
     """Input schema for the sql_query_tool."""
     query: str = Field(description="The natural language question to be converted into a SQL query.")
-
+from langchain_core.documents import Document
 # ==========================
 # 📊 State Management (Simplified and Centralized)
 # ==========================
@@ -272,6 +277,7 @@ class State1(MessagesState):
     tenant_config: Optional[Dict[str, Any]] = Field(default=None) # <-- NEW
 class State(MessagesState):
     """Manages the conversation state. Uses Pydantic models for structured data."""
+    user_query: str
     # Tool outputs
     pdf_content: Optional[str] 
     web_content: Optional[str] 
@@ -288,6 +294,10 @@ class State(MessagesState):
     # For final logging
     metadatas: Optional[Dict[str, Any]] 
     tenant_config: Optional[Dict[str, Any]] # <-- NEW
+    # vector_store:Optional[Document[str, Any]]
+    # vector_store_path: Optional[Chroma]
+    vector_store_paths: Optional[List[str]]
+ 
     # tools_list: Optional[List[Tool]] 
 
 # ==========================
@@ -301,8 +311,23 @@ def get_time_based_greeting():
     if 12 <= current_hour < 17: return "Good afternoon"
     return "Good evening"
 
-def retrieve_from_pdf(query: str, vector_store: Chroma) -> dict: 
+def retrieve_from_pdf(query: str, state: State) -> dict: 
     """Performs a document query using the bound vector store."""
+    # vector_store = state["vector_store"] 
+    
+    vector_store_path = state["tenant_config"]["vector_store_path"]
+    # vector_store_path = state["vector_store_paths"]
+
+    print(vector_store_path)
+    if not os.path.exists(vector_store_path):
+        print(f"Vector store path not found for tenant: {vector_store_path}")
+
+        return {"pdf_content": "Error: Vector store path not found."}
+    vector_store = Chroma(
+        persist_directory=vector_store_path,
+        embedding_function=embeddings
+    )
+
     if vector_store:
         try:
             results = vector_store.similarity_search(query, k=3)
@@ -310,13 +335,21 @@ def retrieve_from_pdf(query: str, vector_store: Chroma) -> dict:
             return {"pdf_content": content}
         except Exception as e:
             # Added better error logging here
-            print(f"Error during PDF search (Chroma): {e}")
+            # print(f"Error during PDF search (Chroma): {e}")
+            print(f"Error during PDF search for tenant at {vector_store_path}: {e}")
             return {"pdf_content": f"Error: Failed to retrieve from PDF: {e}"}
             
     return {"pdf_content": "Error: Document knowledge base not initialized."}
 
 # NOTE: pdf_retrieval_tool definition is intentionally REMOVED from global scope 
 # and created dynamically in process_message.
+pdf_retrieval_tool = Tool(
+    name="pdf_retrieval_tool",
+    description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
+    func=retrieve_from_pdf,
+    args_schema=PDFRetrievalInput,
+)
+
 
 def search_web_func(query: str) -> dict: # 🚨 NOTE: Changed to return dict for ToolMessage
     """Performs web search and returns structured tool output."""
@@ -337,7 +370,7 @@ tavily_search_tool = Tool(
     func=search_web_func,
     args_schema=WebSearchInput,
 )
-
+tools = [pdf_retrieval_tool, tavily_search_tool]
 # Updated `update_state_after_tool_call` function
 def update_state_after_tool_call(state: State) -> dict:
     """
@@ -420,7 +453,8 @@ def agent_node2(state: State):
 # 🛠️ agent_node function (FIXED)
 # ==========================
 # 🚨 FIX 2: Agent node now accepts the tools list directly as an argument.
-def agent_node(state: State, tools_for_llm: List[Tool]): 
+# def agent_node(state: State, tools_for_llm: List[Tool]): 
+def agent_node(state: State):
     """
     The Router Node: Decides whether to call a tool or generate a final answer.
     """
@@ -441,7 +475,7 @@ def agent_node(state: State, tools_for_llm: List[Tool]):
     )
     
     # 🚨 FIX 2 (cont.): Bind ALL tools from the argument list to the LLM.
-    llm_with_tools = llm.bind_tools(tools_for_llm) 
+    llm_with_tools = llm.bind_tools(tools) 
     response = llm_with_tools.invoke([system_prompt] + messages)
     
     last_tool_name = None
@@ -451,21 +485,35 @@ def agent_node(state: State, tools_for_llm: List[Tool]):
         
     return {"messages": [response], "last_tool_name": last_tool_name}
 
+
+def should_continue_or_end(state: State) -> str:
+    """Routes the flow based on tool calls or the special greeting flag."""
+    # 🚨 FIX: Handles the 'GREETING_SENT' flag
+    if state.get("last_tool_name") == "GREETING_SENT":
+        return END
+    
+    if state["messages"][-1].tool_calls:
+        return "tools"
+        
+    return "generate_final_answer"
+
 def generate_final_answer_node(state: State):
     """
     The Generator Node: Creates the final structured answer after gathering all necessary context from tools.
     """
     print("--- GENERATE FINAL ANSWER NODE ---")
+    user_query = state.get("user_query")
+    # user_query = state["messages"][-1].content
   
     messages = state["messages"] 
     tenant_config = state["tenant_config"] 
 
     # Find the last HumanMessage
-    user_query = " "
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            user_query = msg.content
-            break
+    # user_query = " "
+    # for msg in reversed(messages):
+    #     if isinstance(msg, HumanMessage):
+    #         user_query = msg.content
+    #         break
             
     if not user_query:
         user_query = "The user asked an unrecoverable question."
@@ -486,14 +534,49 @@ def generate_final_answer_node(state: State):
     prompt = ""  
     
     # Get the template, using a sane default if the tenant config is missing
-    prompt_template = tenant_config.get("final_prompt", 
+    prompt_template1 = tenant_config.get("final_prompt", 
                                        "Based on the following context, answer the user's question clearly and professionally.\n\nUser Question: {0}\n\nContext:\n{1}") 
+    
+    prompt_template=f"""You are Damilola, the AI-powered virtual assistant for ATB. Your role is to deliver professional customer service and insightful data analysis, depending on the user's needs.
+
+You operate in two modes:
+1. **Customer Support**: Respond with empathy, clarity, and professionalism. Your goal is to resolve issues, answer questions, and guide users to helpful resources — without technical jargon or internal system references.
+2. **Data Analyst**: Interpret data, explain trends, and offer actionable insights. When visualizations are included, describe what the chart shows and what it means for the user.
+
+Your response must be:
+- **Final**: No follow-up questions or uncertainty.
+- **Clear and Polite**: Use emotionally intelligent language, especially if the user expresses frustration or confusion.
+- **Context-Aware**: Avoid mentioning internal systems (e.g., database names or SQL sources) unless explicitly requested.
+- **Structured**: Always return your answer in the following JSON format.
+
+User Question:
+{user_query}
+
+Available Context:
+---
+{context}
+---
+
+If the context includes 'Visualization Analysis', describe the chart’s content and implications.
+
+Format your response as a JSON object using this schema (omit 'chart_base64'):
+
+Schema:
+{{
+  "answer": "str: Your clear, concise, and polite response.",
+  "sentiment": "int: An integer rating of the user's sentiment (-2 to +2).",
+  "ticket": "List[str]: Relevant service channels (e.g., 'email', 'live chat', 'support portal'). Empty list if not applicable.",
+  "source": "List[str]: Sources used to generate the answer. Empty list if not applicable."
+}}
+   """
+    
     print(f"Using prompt template: {prompt_template[:50]}...")
 
     
     try:
         # Format the final prompt
         prompt = prompt_template.format(user_query, context)
+        prompt = prompt_template
     except Exception as e:
         # Fallback if formatting fails (e.g., mismatch in {0}, {1}, etc.)
         print(f"Error formatting final prompt: {e}. Falling back to default prompt structure.")
@@ -513,17 +596,6 @@ def generate_final_answer_node(state: State):
         "messages": new_messages
     }
 
-def should_continue_or_end(state: State) -> str:
-    """Routes the flow based on tool calls or the special greeting flag."""
-    # 🚨 FIX: Handles the 'GREETING_SENT' flag
-    if state.get("last_tool_name") == "GREETING_SENT":
-        return END
-    
-    if state["messages"][-1].tool_calls:
-        return "tools"
-        
-    return "generate_final_answer"
-
 def summarize_conversation(state: State):
     print("--- SUMMARIZE CONVERSATION NODE ---")
     
@@ -538,6 +610,20 @@ def summarize_conversation(state: State):
 
     conversation_history = "\n".join([f"{msg.type}: {msg.content}" for msg in messages])
 
+    summarize_prompt_template1=f"""Please provide a structured summary of the following conversation.
+    
+    Conversation History:
+    {conversation_history}
+    
+    Provide the output in a JSON format matching this schema:
+    {{
+        "summary": "A concise summary of the entire conversation.",
+        "sentiment": "Overall sentiment score of the conversation (-2 to +2).",
+        "unresolved_tickets": ["List of channels with unresolved issues."],
+        "all_sources": ["All unique sources referenced in the conversation."]
+    }}"""
+
+
     # 🚨 FIX: Provide a safe, format-ready default template
     summarize_prompt_template = tenant_config.get(
         "summary_prompt", 
@@ -545,6 +631,8 @@ def summarize_conversation(state: State):
     ) 
     try:
         summarize_prompt = summarize_prompt_template.format(conversation_history)
+        # summarize_prompt=summarize_prompt_template
+        print ("Alukiif",summarize_prompt)
     except Exception as e:
         print(f"ERROR: Summary prompt format failed: {e}. Using raw history.")
         summarize_prompt = "Summarize the following raw history: " + conversation_history
@@ -556,14 +644,14 @@ def summarize_conversation(state: State):
     
     # Create the final metadata dictionary for logging
     final_answer = state.get("final_answer")
-    last_user_question = ""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            last_user_question = msg.content
-            break
+    user_query = state.get("user_query")
+    # for msg in reversed(messages):
+    #     if isinstance(msg, HumanMessage):
+    #         last_user_question = msg.content
+    #         break
 
     metadata_dict = {
-        "question": last_user_question, # Use the robustly found question
+        "question": user_query, # Use the robustly found question
         "answer": final_answer.answer if final_answer else "N/A",
         "sentiment": final_answer.sentiment if final_answer else 0,
         "ticket": final_answer.ticket if final_answer else [],
@@ -581,6 +669,7 @@ def summarize_conversation(state: State):
     }
 
 # Define the condition to check if a tool was called
+# Define the condition to check if a tool was called
 def should_continue(state: State) -> str:
     """Determines the next step: call a tool or generate the final answer."""
     if state["messages"][-1].tool_calls:
@@ -592,13 +681,13 @@ def should_continue(state: State) -> str:
 # ==========================
 
 # def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
-def build_graph(tools_list, agent_node_func): 
+
+def build_graph():
     """Builds and compiles the LangGraph workflow."""
     workflow = StateGraph(State)
-    workflow.add_node("agent_node", agent_node_func)
     
-    # workflow.add_node("agent_node", agent_node)
-    workflow.add_node("tools", ToolNode(tools=tools_list)) # 🚨 FIX: Uses the dynamic list
+    workflow.add_node("agent_node", agent_node)
+    workflow.add_node("tools", ToolNode(tools=tools))
     workflow.add_node("update_state", update_state_after_tool_call)
 
     workflow.add_node("generate_final_answer", generate_final_answer_node)
@@ -606,19 +695,14 @@ def build_graph(tools_list, agent_node_func):
 
     workflow.set_entry_point("agent_node")
 
-    # 🚨 FIX: Use the custom router to handle greetings and tool calls
-    workflow.add_conditional_edges(
-        "agent_node", 
-        should_continue_or_end, 
-        {
-            "tools": "tools",
-            "generate_final_answer": "generate_final_answer",
-            END: END 
-        }
-    )
+    workflow.add_conditional_edges("agent_node", tools_condition, {"tools": "tools",END: "generate_final_answer",})
+    
 
+
+    # workflow.add_conditional_edges("agent_node", should_continue)
     workflow.add_edge("tools", "update_state")
     workflow.add_edge("update_state", "agent_node")
+    # workflow.add_edge("tools", "agent_node")
     workflow.add_edge("generate_final_answer", "summarize")
     workflow.add_edge("summarize", END)
     
@@ -637,6 +721,7 @@ def build_graph(tools_list, agent_node_func):
         memory = SqliteSaver(conn=conn)
         print("SQLite checkpointing connected successfully.")
     except Exception as e:
+        # from langgraph.checkpoint.memory import InMemorySaver
         print(f"Error connecting to SQLite for checkpointing: {e}. Using in-memory saver.")
         # memory = InMemorySaver()
     return workflow.compile(checkpointer=memory)
@@ -656,38 +741,18 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
 
     # ⚠️ Initialize the tenant-specific, persistent vector store
     tenant_vector_store = initialize_vector_store(tenant_id)
-    
-    # 🚨 FIX: Create the RAG tool binding and define the tool list here!
-    # 1. Bind the vector store instance to the retrieval function
-    pdf_retrieval_bound = partial(retrieve_from_pdf, vector_store=tenant_vector_store)
-        # 1. Bind the vector store instance to the retrieval function
-    # pdf_retrieval_bound = partial(retrieve_from_pdf, vector_store=tenant_vector_store)
+    user_query =message_content
+   
+   
 
-     # 2. Redefine the PDF tool using the bound function
-    # pdf_retrieval_tool_dynamic = Tool(
-    #     name="pdf_retrieval_tool",
-    #     description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
-    #     func=pdf_retrieval_bound,
-    #     args_schema=PDFRetrievalInput,
-    # )
-
-    pdf_retrieval_wrapper = lambda query: retrieve_from_pdf(
-        query=query, 
-        vector_store=tenant_vector_store
-    )
-     # 2. Redefine the PDF tool using the new wrapper function
-    pdf_retrieval_tool_dynamic = Tool(
-        name="pdf_retrieval_tool",
-        description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
-        func=pdf_retrieval_wrapper, # <-- Use the lambda here
-        args_schema=PDFRetrievalInput,
-    )
-    # 3. Create the final tools list to pass to the graph builder
-    local_tools = [pdf_retrieval_tool_dynamic, tavily_search_tool]
+   
+    # # 3. Create the final tools list to pass to the graph builder
+    # local_tools = [pdf_retrieval_tool_dynamic, tavily_search_tool]
      # 🚨 FIX 4A: Bind the tools list to the agent_node function
-    bound_agent_node = partial(agent_node, tools_for_llm=local_tools)
+    # bound_agent_node = partial(agent_node, tools_for_llm=local_tools)
      # 🚨 FIX 4B: Pass BOTH the tool list and the bound node to build_graph
-    graph = build_graph(local_tools, bound_agent_node) 
+    # graph = build_graph(local_tools, bound_agent_node) 
+    graph = build_graph()
 
     # graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
 
@@ -727,7 +792,7 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
                 # Invoke the model with the message
                 response = llm.invoke([message])
                 # Invoke the model
-                response = llm.invoke([message])
+                # response = llm.invoke([message])
                 attached_content = response.content
 
                 print("Attached content from image:", attached_content)
@@ -743,11 +808,16 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
     initial_state = {
         "messages": [HumanMessage(content=message_content)], 
         "attached_content": attached_content,
+        "user_query": user_query,
         "tenant_config": {
             "greeting": current_tenant.chatbot_greeting,
             "agent_prompt": current_tenant.agent_node_prompt,
             "final_prompt": current_tenant.final_answer_prompt,
             "summary_prompt": current_tenant.summary_prompt,
+             "vector_store_path": os.path.join(settings.BASE_DIR, "chroma_dbs", tenant_id),
+
+
+
             
         }
     }
@@ -773,3 +843,4 @@ def process_message(message_content: str, session_id: str, tenant_id: str, file_
             "chart": None,
             "metadata": {}
         }
+    
