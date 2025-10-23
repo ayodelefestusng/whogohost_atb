@@ -8,6 +8,7 @@ import logging
 
 @csrf_exempt
 def chatbot(request):
+    print("Chatbot view called")
     if request.method != 'POST':
         return JsonResponse({'status': 'error', 'response': 'Invalid request method'}, status=405)
 
