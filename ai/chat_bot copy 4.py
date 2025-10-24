@@ -98,8 +98,8 @@ from io import BytesIO
 # import matplotlib.pyplot as plt
 # import pandas as pd
 # from matplotlib.ticker import FuncFormatter
-from sqlalchemy import Boolean, create_engine
-from .models import Conversation, Tenant
+from sqlalchemy import create_engine
+from .models import Tenant
 
 from langchain_openai import OpenAIEmbeddings
 logging.basicConfig(
@@ -112,29 +112,27 @@ logging.basicConfig(
 # ⚙️ Configuration & Initialization
 # ==========================
 # Load API keys from environment variables for security
-
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # GOOGLE_API_KEY = "AIzaSyBV7_Cbak1LhE2bHK_aG4ARaa6anxjBClY"
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-# LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
-# LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT")
-# LANGSMITH_ENDPOINT = os.getenv("LANGSMITH_ENDPOINT")
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-# GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") # Ensure this is set in .env if used
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
+LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT")
+LANGSMITH_ENDPOINT = os.getenv("LANGSMITH_ENDPOINT")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") # Ensure this is set in .env if used
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Ensure this is set in .env if used
 # PDF_PATH = os.getenv("PDF_PATH", "default.pdf") # Default value for PDF_PATH
 
 # # Set environment variables for LangSmith
-# os.environ["LANGSMITH_TRACING"] = "true"
-# os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY if LANGSMITH_API_KEY else ""
-# os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT if LANGSMITH_PROJECT else "Agent_Creation"
-# os.environ["LANGSMITH_ENDPOINT"] = LANGSMITH_ENDPOINT if LANGSMITH_ENDPOINT else "https://api.smith.langchain.com"
-# os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY if GOOGLE_API_KEY else ""
-# os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY if TAVILY_API_KEY else ""
-# os.environ["GROQ_API_KEY"] = GROQ_API_KEY if GROQ_API_KEY else ""
-# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY if OPENAI_API_KEY else ""
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_API_KEY"] = LANGSMITH_API_KEY if LANGSMITH_API_KEY else ""
+os.environ["LANGSMITH_PROJECT"] = LANGSMITH_PROJECT if LANGSMITH_PROJECT else "Agent_Creation"
+os.environ["LANGSMITH_ENDPOINT"] = LANGSMITH_ENDPOINT if LANGSMITH_ENDPOINT else "https://api.smith.langchain.com"
+os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY if GOOGLE_API_KEY else ""
+os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY if TAVILY_API_KEY else ""
+os.environ["GROQ_API_KEY"] = GROQ_API_KEY if GROQ_API_KEY else ""
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY if OPENAI_API_KEY else ""
 tavily_search = TavilySearch(max_results=2)
 # Configure Google Generative AI
 # genai.configure(api_key=GOOGLE_API_KEY)
@@ -240,17 +238,17 @@ class Summary(BaseModel):
     unresolved_tickets: List[str] = Field(description="A list of channels with unresolved issues.")
     all_sources: List[str] = Field(description="All unique sources referenced throughout the conversation.")
 
-# class PDFRetrievalInput(BaseModel):
-#     """Input schema for the pdf_retrieval_tool."""
-#     query: str = Field(description="The user's query to search for within the PDF document.")
+class PDFRetrievalInput(BaseModel):
+    """Input schema for the pdf_retrieval_tool."""
+    query: str = Field(description="The user's query to search for within the PDF document.")
 
-# class WebSearchInput(BaseModel):
-#     """Input schema for the tavily_search_tool."""
-#     query: str = Field(description="A concise search query for the web.")
+class WebSearchInput(BaseModel):
+    """Input schema for the tavily_search_tool."""
+    query: str = Field(description="A concise search query for the web.")
 
-# class SQLQueryInput(BaseModel):
-#     """Input schema for the sql_query_tool."""
-#     query: str = Field(description="The natural language question to be converted into a SQL query.")
+class SQLQueryInput(BaseModel):
+    """Input schema for the sql_query_tool."""
+    query: str = Field(description="The natural language question to be converted into a SQL query.")
 from langchain_core.documents import Document
 # ==========================
 # 📊 State Management (Simplified and Centralized)
@@ -262,34 +260,25 @@ from langchain_core.documents import Document
 class State(MessagesState):
     """Manages the conversation state. Uses Pydantic models for structured data."""
     user_query: str
-    attached_content: Optional[str]
-
-
-
-
-    # Utility 
-    next_node: Optional[str] 
-    vector_store_paths: Optional[List[str]]
-    tenant_config: Optional[Dict[str, Any]] # <-- NEW
-    # vector_store:Optional[Document[str, Any]]
-    # vector_store_path: Optional[Chroma]
-    
-
+    # Tool outputs
     pdf_content: Optional[str] 
     web_content: Optional[str] 
     sql_result: Optional[str]
     # visualization_result: Optional[Dict[str, Any]] = None # <-- NEW
- 
 
-    
+    attached_content: Optional[str]
+    last_tool_name: Optional[str] 
+
+    # Final structured outputs
     final_answer: Optional[Answer]
     conversation_summary: Optional[Summary]
 
     # For final logging
     metadatas: Optional[Dict[str, Any]] 
-
-    
-    
+    tenant_config: Optional[Dict[str, Any]] # <-- NEW
+    # vector_store:Optional[Document[str, Any]]
+    # vector_store_path: Optional[Chroma]
+    vector_store_paths: Optional[List[str]]
  
     # tools_list: Optional[List[Tool]] 
 
@@ -304,9 +293,7 @@ def get_time_based_greeting():
     if 12 <= current_hour < 17: return "Good afternoon"
     return "Good evening"
 
-
-def search_pdf(state: State): 
-# def retrieve_from_pdf(query: str, state: State) -> dict: 
+def retrieve_from_pdf(query: str, state: State) -> dict: 
     """Performs a document query using the bound vector store."""
     # vector_store = state["vector_store"] 
     
@@ -325,10 +312,7 @@ def search_pdf(state: State):
 
     if vector_store:
         try:
-            ayula=state["messages"][-1].content
-            attached_content=state["attached_content"]
-            user_input = f"User Query:\n{ayula}\n\n:Attached File Content:\n{attached_content}"
-            results = vector_store.similarity_search(user_input, k=3)
+            results = vector_store.similarity_search(query, k=3)
             content = "\n\n".join([doc.page_content for doc in results])
             return {"pdf_content": content}
         except Exception as e:
@@ -341,67 +325,77 @@ def search_pdf(state: State):
 
 # NOTE: pdf_retrieval_tool definition is intentionally REMOVED from global scope 
 # and created dynamically in process_message.
-# pdf_retrieval_tool = Tool(
-#     name="pdf_retrieval_tool",
-#     description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
-#     func=retrieve_from_pdf,
-#     args_schema=PDFRetrievalInput,
-# )
-
-
-def search_web(state: State):  
-        """Perform web search"""
-        
-        try:
-            
-            ayula=state["messages"][-1].content
-            attached_content=state["attached_content"]
-            user_input = f"User Query:\n{ayula}\n\n:Attached File Content:\n{attached_content}"
-           
-            search = TavilySearch(max_results=2)
-            search_docs = search.invoke(input=user_input)
-            # search_docs = tavily_search.invoke(user_input)
-            # print ("Web: Response Type:", search_docs)  # Debug print
-            
-            if any(error in str(search_docs) for error in ["ConnectionError", "HTTPSConnectionPool"]):
-                return {"web_content": ""}
-                
-            formatted_docs = "\n\n---\n\n".join(
-                f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
-                for doc in search_docs['results']
-            )
-            return {"web_content": formatted_docs}
-        except Exception as e:
-            print(f"Web search error: {e}")
-            return {"web_content": ""}
-
-
 pdf_retrieval_tool = Tool(
-    name="search_pdf",
-    description="Useful for answering questions that require information from the tenant's internal knowledge base (PDFs). Always use this tool first for tenant-specific queries. Input should be the user's question.",
-    func=search_pdf,
+    name="pdf_retrieval_tool",
+    description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
+    func=retrieve_from_pdf,
+    args_schema=PDFRetrievalInput,
 )
 
-# 2. Define the Web Search tool (bound to the search_web function)
-web_search_tool = Tool(
-    name="search_web",
-    description="Useful for answering general or external knowledge questions that are NOT found in the tenant's internal PDF. Input should be a concise search query.",
-    func=search_web,
+
+def search_web_func(query: str) -> dict: # 🚨 NOTE: Changed to return dict for ToolMessage
+    """Performs web search and returns structured tool output."""
+    try:
+        search_docs = tavily_search.invoke(query)
+        formatted_docs = "\n\n---\n\n".join(
+            f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
+            for doc in search_docs.get("results", [])
+        )
+        return {"web_content": formatted_docs or "No results found from web search."}
+    except Exception as e:
+        print(f"Web search error: {e}")
+        return {"web_content": f"Error during web search: {e}"}
+
+tavily_search_tool = Tool(
+    name="tavily_search_tool",
+    description="Useful for general questions or questions requiring up-to-date information from the web. Input should be a concise search query.",
+    func=search_web_func,
+    args_schema=WebSearchInput,
 )
+tools = [pdf_retrieval_tool, tavily_search_tool]
+# Updated `update_state_after_tool_call` function
+def update_state_after_tool_call(state: State) -> dict:
+    """
+    Updates the specific state field with the output from the last tool call.
+    """
+    print("--- UPDATING STATE FROM TOOL OUTPUT ---")
+    last_message = state["messages"][-1]
+    
+    # Ensure the last message is a ToolMessage
+    if not isinstance(last_message, ToolMessage):
+        return {}
 
-# 3. Create the tools list
-local_tools = [pdf_retrieval_tool, web_search_tool]
+    tool_name = state.get("last_tool_name")
+    
+    # Check if content is a stringified dictionary
+    try:
+        tool_output_dict = json.loads(last_message.content)
+        if tool_name == "pdf_retrieval_tool":
+            tool_output = tool_output_dict.get('pdf_content', 'Error: Missing PDF content key.')
+        elif tool_name == "tavily_search_tool":
+            tool_output = tool_output_dict.get('web_content', 'Error: Missing web content key.')
+        else:
+            tool_output = last_message.content # Fallback
+    except json.JSONDecodeError:
+        tool_output = last_message.content # Not JSON, use raw content
+    
+    print(f"Tool '{tool_name}' returned: {tool_output[:200]}...")
 
-# Note: We'll pass these tools into the new agent node function.
-# The graph compilation part below remains the same for now, but we'll update build_graph.
-# We'll modify build_graph to accept this list
-# ...
+    if tool_name == "pdf_retrieval_tool":
+        return {"pdf_content": tool_output}
+    elif tool_name == "tavily_search_tool":
+        return {"web_content": tool_output}
+
+    return {}
+
+
+
 # ==========================
 # 🛠️ agent_node function (FIXED)
 # ==========================
 # 🚨 FIX 2: Agent node now accepts the tools list directly as an argument.
 # def agent_node(state: State, tools_for_llm: List[Tool]): 
-def agent_node1(state: State):
+def agent_node(state: State):
     """
     The Router Node: Decides whether to call a tool or generate a final answer.
     """
@@ -412,72 +406,39 @@ def agent_node1(state: State):
     # tools_for_llm is now available via the argument, not the state.
 
     if len(messages) == 1:
-        if True:
-            # ... (greeting logic remains the same)
-            greeting = tenant_config.get("greeting", "How can I help?") 
-            new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
-            return {"messages": new_messages, "next_node": "END"} 
+        # ... (greeting logic remains the same)
+        greeting = tenant_config.get("greeting", "How can I help?") 
+        new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
+        return {"messages": new_messages, "last_tool_name": "GREETING_SENT"} 
     
-    elif state.get("summary_request") == "true":
-        return "generate_summary"
-    else:
-        return "prepare_answer"
-
-# Replace your current agent_node function with this:
-
-def run_agent(state: State, tools: List[Tool]):
-    """
-    The Agent Node: Uses the LLM to decide whether to call a tool or generate a final answer.
-    """
-    print("--- LLM AGENT NODE (Decision Maker) ---")
-    messages = state["messages"]
-    
-    # Check for initial greeting scenario
-    if len(messages) == 1:
-        # Check if the message is the first one in the conversation
-        if not state.get("summarization_request") == "true":
-             tenant_config = state["tenant_config"] 
-             greeting = tenant_config.get("greeting", "Hello! How can I help you?") 
-             new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
-             # Add a flag to the state to skip further processing
-             return {"messages": new_messages, "next_node": "GREETING_SENT"} 
-
-    
-    # Get the system prompt from tenant config for the agent
-    # We'll use a strong default if it's missing
-    agent_prompt_template = state["tenant_config"].get("agent_prompt", 
-        "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
+    system_prompt = SystemMessage(
+        content=tenant_config.get("agent_prompt", "You are a helpful AI assistant.")
     )
     
-    # Bind the tools and the system prompt to the LLM
-    agent_llm = llm.bind_tools(tools=tools).with_config(
-        {"tags": ["agent_decision_maker"], "system_message": agent_prompt_template}
-    )
-
-    # Invoke the LLM with the message history
-    response = agent_llm.invoke(messages)
+    # 🚨 FIX 2 (cont.): Bind ALL tools from the argument list to the LLM.
+    llm_with_tools = llm.bind_tools(tools) 
+    response = llm_with_tools.invoke([system_prompt] + messages)
     
-    # Update the state with the LLM's response (which may contain tool_calls)
-    return {"messages": messages + [response]}
+    last_tool_name = None
+    if response.tool_calls:
+        last_tool_name = response.tool_calls[0]['name']
+        print(f"LLM decided to call tool: {last_tool_name}")
+        
+    return {"messages": [response], "last_tool_name": last_tool_name}
 
 
-
-def conditional_rule(state: State) -> str:
+def should_continue_or_end(state: State) -> str:
     """Routes the flow based on tool calls or the special greeting flag."""
     # 🚨 FIX: Handles the 'GREETING_SENT' flag
-    if state.get("next_node") == "END":
+    if state.get("last_tool_name") == "GREETING_SENT":
         return END
     
-    elif state.get("summary_request") == "true":
-        return "generate_summary"
+    if state["messages"][-1].tool_calls:
+        return "tools"
+        
+    return "generate_final_answer"
 
-    return "prepare_answer"
-
-def make_call(state: State):
-   pass
-
-
-def generate_answer(state: State):
+def generate_final_answer_node(state: State):
     """
     The Generator Node: Creates the final structured answer after gathering all necessary context from tools.
     """
@@ -498,7 +459,8 @@ def generate_answer(state: State):
     if not user_query:
         user_query = "The user asked an unrecoverable question."
     print("Aleu",user_query)
-  
+   
+    print ("Lemu",state.get("pdf_content"))
 
     
     context_parts = []
@@ -507,12 +469,16 @@ def generate_answer(state: State):
     if state.get("attached_content"): context_parts.append(f"Attached Content:\n{state['attached_content']}")
     context = "\n\n".join(context_parts) if context_parts else "No additional context was retrieved."
 
+    print ("Lemu",state.get("pdf_content"))
 
     # 🚨 FIX: Ensure prompt is defined and safely formatted
- 
+    prompt = ""  
     
-
-    prompt_template="""You are Damilola, the AI-powered virtual assistant for ATB. Your role is to deliver professional customer service and insightful data analysis, depending on the user's needs.
+    # Get the template, using a sane default if the tenant config is missing
+    prompt_template1 = tenant_config.get("final_prompt", 
+                                       "Based on the following context, answer the user's question clearly and professionally.\n\nUser Question: {0}\n\nContext:\n{1}") 
+    
+    prompt_template=f"""You are Damilola, the AI-powered virtual assistant for ATB. Your role is to deliver professional customer service and insightful data analysis, depending on the user's needs.
 
 You operate in two modes:
 1. **Customer Support**: Respond with empathy, clarity, and professionalism. Your goal is to resolve issues, answer questions, and guide users to helpful resources — without technical jargon or internal system references.
@@ -545,7 +511,7 @@ Schema:
 }}
    """
     
-
+    print(f"Using prompt template: {prompt_template[:50]}...")
 
     
     try:
@@ -575,8 +541,6 @@ def summarize_conversation(state: State):
     print("--- SUMMARIZE CONVERSATION NODE ---")
     
     messages = state.get("messages", [])
-    conversation_id=state.get("conversation_id", "")
-
     tenant_config = state["tenant_config"] 
 
     if not messages:
@@ -585,22 +549,13 @@ def summarize_conversation(state: State):
             "metadatas": {"error": "No messages to summarize."}
         }
 
-    # conversation_history = "\n".join([f"{msg.type}: {msg.content}" for msg in messages])
-    messages = state["messages"]
-    conversation= Conversation.objects.get(conversation_id=conversation_id)
-    conversation_history=conversation.summary
-    len_hist=conversation.message_count
-    rec=len(messages) -len_hist
-    recent_message =state["messages"][-rec]
-
-
+    conversation_history = "\n".join([f"{msg.type}: {msg.content}" for msg in messages])
 
     summarize_prompt_template1=f"""Please provide a structured summary of the following conversation.
     
-    Summary of Previous Conversation:
+    Conversation History:
     {conversation_history}
-    Recent Message:{recent_message}
-
+    
     Provide the output in a JSON format matching this schema:
     {{
         "summary": "A concise summary of the entire conversation.",
@@ -610,10 +565,6 @@ def summarize_conversation(state: State):
     }}"""
 
 
-
-
-    
-
     # 🚨 FIX: Provide a safe, format-ready default template
     summarize_prompt_template = tenant_config.get(
         "summary_prompt", 
@@ -622,7 +573,7 @@ def summarize_conversation(state: State):
     try:
         summarize_prompt = summarize_prompt_template.format(conversation_history)
         # summarize_prompt=summarize_prompt_template
-  
+        print ("Alukiif",summarize_prompt)
     except Exception as e:
         print(f"ERROR: Summary prompt format failed: {e}. Using raw history.")
         summarize_prompt = "Summarize the following raw history: " + conversation_history
@@ -633,21 +584,20 @@ def summarize_conversation(state: State):
     summary_obj = structured_llm.invoke(summarize_prompt)
     
     # Create the final metadata dictionary for logging
-
     final_answer = state.get("final_answer")
     user_query = state.get("user_query")
     # for msg in reversed(messages):
     #     if isinstance(msg, HumanMessage):
     #         last_user_question = msg.content
     #         break
-    conversation.message_count=len(messages) 
-    conversation.save()
+
     metadata_dict = {
         "question": user_query, # Use the robustly found question
         "answer": final_answer.answer if final_answer else "N/A",
         "sentiment": final_answer.sentiment if final_answer else 0,
         "ticket": final_answer.ticket if final_answer else [],
         "source": final_answer.source if final_answer else [],
+        "chart_base64": final_answer.chart_base64 if final_answer else None,
         "summary": summary_obj.summary,
         "summary_sentiment": summary_obj.sentiment,
         "summary_unresolved_tickets": summary_obj.unresolved_tickets,
@@ -661,11 +611,11 @@ def summarize_conversation(state: State):
 
 # Define the condition to check if a tool was called
 # Define the condition to check if a tool was called
-# def should_continue(state: State) -> str:
-#     """Determines the next step: call a tool or generate the final answer."""
-#     if state["messages"][-1].tool_calls:
-#         return "tools"
-#     return "generate_final_answer"
+def should_continue(state: State) -> str:
+    """Determines the next step: call a tool or generate the final answer."""
+    if state["messages"][-1].tool_calls:
+        return "tools"
+    return "generate_final_answer"
 
 # ==========================
 # 🔄 Graph Workflow
@@ -673,39 +623,28 @@ def summarize_conversation(state: State):
 
 # def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
 
-
-
 def build_graph():
-
     """Builds and compiles the LangGraph workflow."""
     workflow = StateGraph(State)
     
     workflow.add_node("agent_node", agent_node)
-    workflow.add_node("conditional_rule", conditional_rule)
-    workflow.add_node("make_call", make_call)
-    workflow.add_node("search_web", search_web)
-    workflow.add_node("search_pdf", search_pdf)
-    
+    workflow.add_node("tools", ToolNode(tools=tools))
+    workflow.add_node("update_state", update_state_after_tool_call)
 
-
-    # workflow.add_node("tools", ToolNode(tools=tools))
-    # workflow.add_node("update_state", update_state_after_tool_call)
-
-    workflow.add_node("generate_answer", generate_answer)
+    workflow.add_node("generate_final_answer", generate_final_answer_node)
     workflow.add_node("summarize", summarize_conversation)
 
     workflow.set_entry_point("agent_node")
 
-    workflow.add_conditional_edges("agent_node", conditional_rule, {END, "generate_summary","make_call"})
+    workflow.add_conditional_edges("agent_node", tools_condition, {"tools": "tools",END: "generate_final_answer",})
     
-    workflow.add_edge("agent_node", END)
-    workflow.add_edge("make_call","search_web" )
-    workflow.add_edge("make_call","search_pdf")
 
-    workflow.add_edge("search_web", "generate_answer")
-    workflow.add_edge("search_pdf", "generate_answer")
 
-    workflow.add_edge("generate_answer", END)
+    # workflow.add_conditional_edges("agent_node", should_continue)
+    workflow.add_edge("tools", "update_state")
+    workflow.add_edge("update_state", "agent_node")
+    # workflow.add_edge("tools", "agent_node")
+    workflow.add_edge("generate_final_answer", "summarize")
     workflow.add_edge("summarize", END)
     
     # Initialize checkpointing with a robust fallback
@@ -731,8 +670,7 @@ def build_graph():
 # Main processing function
 # def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
 
-
-def process_message(message_content: str, conversation_id: str, tenant_id: str, file_path: Optional[str] = None,summarization_request: Optional[str] = None):
+def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
 
     """Main function to process user messages using the LangGraph agent."""
 
@@ -759,17 +697,9 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
 
     # graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
 
-    config = {"configurable": {"thread_id": conversation_id}}
+    config = {"configurable": {"thread_id": session_id}}
     
     attached_content = None # Simplified for this example
-    summarization_request =None
-    if summarization_request:
-        summarization_request="true"
-    else:
-        summarization_request="false"
-
-
-
     # Image processing logic can be added here as in the original code
     if file_path:
         try:
@@ -820,8 +750,6 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
         "messages": [HumanMessage(content=message_content)], 
         "attached_content": attached_content,
         "user_query": user_query,
-        "summarization_request": summarization_request,
-        "conversation_id":conversation_id,
         "tenant_config": {
             "greeting": current_tenant.chatbot_greeting,
             "agent_prompt": current_tenant.agent_node_prompt,
