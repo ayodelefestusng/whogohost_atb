@@ -49,8 +49,12 @@ INSTALLED_APPS = [
 
     #    'myapp',
      'ai',
+     'drf_spectacular',
+
 
 ]
+
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -186,3 +190,14 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# DRF SPECTACULAR SETTINGS FOR API DOCUMENTATION(Optiona)
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'My Project API',
+    'DESCRIPTION': 'API documentation for My Project',
+    'VERSION': '1.0.0',
+}
