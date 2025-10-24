@@ -251,7 +251,7 @@ class Summary(BaseModel):
 # class SQLQueryInput(BaseModel):
 #     """Input schema for the sql_query_tool."""
 #     query: str = Field(description="The natural language question to be converted into a SQL query.")
-from langchain_core.documents import Document
+
 # ==========================
 # 📊 State Management (Simplified and Centralized)
 # ==========================
@@ -401,27 +401,6 @@ local_tools = [pdf_retrieval_tool, web_search_tool]
 # ==========================
 # 🚨 FIX 2: Agent node now accepts the tools list directly as an argument.
 # def agent_node(state: State, tools_for_llm: List[Tool]): 
-def agent_node1(state: State):
-    """
-    The Router Node: Decides whether to call a tool or generate a final answer.
-    """
-    print("--- AGENT NODE (ROUTER) ---")
-    messages = state["messages"]
-    tenant_config = state["tenant_config"] 
-    
-    # tools_for_llm is now available via the argument, not the state.
-
-    if len(messages) == 1:
-        if True:
-            # ... (greeting logic remains the same)
-            greeting = tenant_config.get("greeting", "How can I help?") 
-            new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
-            return {"messages": new_messages, "next_node": "END"} 
-    
-    elif state.get("summary_request") == "true":
-        return "generate_summary"
-    else:
-        return "prepare_answer"
 
 # Replace your current agent_node function with this:
 
@@ -437,7 +416,7 @@ def run_agent(state: State, tools: List[Tool]):
         # Check if the message is the first one in the conversation
         if not state.get("summarization_request") == "true":
              tenant_config = state["tenant_config"] 
-             greeting = tenant_config.get("greeting", "Hello! How can I help you?") 
+             greeting = tenant_config.get("chatbot_greeting", "Hello! How can I help you?") 
              new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
              # Add a flag to the state to skip further processing
              return {"messages": new_messages, "next_node": "GREETING_SENT"} 
@@ -445,9 +424,11 @@ def run_agent(state: State, tools: List[Tool]):
     
     # Get the system prompt from tenant config for the agent
     # We'll use a strong default if it's missing
-    agent_prompt_template = state["tenant_config"].get("agent_prompt", 
-        "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
-    )
+    # agent_prompt_template = state["tenant_config"].get("agent_prompt", 
+    #     "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
+    # )
+    agent_prompt_template = "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
+
     
     # Bind the tools and the system prompt to the LLM
     agent_llm = llm.bind_tools(tools=tools).with_config(
@@ -477,7 +458,7 @@ def make_call(state: State):
    pass
 
 
-def generate_answer(state: State):
+def generate_final_answer_node(state: State):
     """
     The Generator Node: Creates the final structured answer after gathering all necessary context from tools.
     """
@@ -674,62 +655,121 @@ def summarize_conversation(state: State):
 # def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
 
 
+# Main processing function
+# def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
 
-def build_graph():
-
+def build_graph(tools: List[Tool]): 
     """Builds and compiles the LangGraph workflow."""
+    
+    # 1. Define the ToolNode for execution (takes the tools list)
+    tool_node = ToolNode(tools=tools)
+
     workflow = StateGraph(State)
     
-    workflow.add_node("agent_node", agent_node)
-    workflow.add_node("conditional_rule", conditional_rule)
-    workflow.add_node("make_call", make_call)
-    workflow.add_node("search_web", search_web)
-    workflow.add_node("search_pdf", search_pdf)
+    # 2. Add the nodes
+    # 'run_agent' is the new agent decision-maker
+    workflow.add_node("run_agent", partial(run_agent, tools=tools)) 
     
+    # 'tools' is the LangGraph ToolNode executor
+    workflow.add_node("tools", tool_node) 
+    
+    # Tool execution nodes (these run inside the ToolNode) are now removed from nodes list: 
+    # workflow.add_node("search_web", search_web)
+    # workflow.add_node("search_pdf", search_pdf)
 
-
-    # workflow.add_node("tools", ToolNode(tools=tools))
-    # workflow.add_node("update_state", update_state_after_tool_call)
-
-    workflow.add_node("generate_answer", generate_answer)
+    workflow.add_node("generate_final_answer", generate_final_answer_node)
     workflow.add_node("summarize", summarize_conversation)
 
-    workflow.set_entry_point("agent_node")
+    # 3. Define the Entry Point
+    workflow.set_entry_point("run_agent")
 
-    workflow.add_conditional_edges("agent_node", conditional_rule, {END, "generate_summary","make_call"})
+    # 4. Define the Edges
+
+    # Custom function to route from the initial decision maker
+    def route_agent_decision(state: State) -> str:
+        """Determines the next step after the LLM agent runs."""
+        if state.get("next_node") == "GREETING_SENT":
+            return END
+        
+        if state.get("summarization_request") == "true":
+            return "summarize"
+
+        # Check for tool calls made by the LLM (ReAct loop)
+        if state["messages"][-1].tool_calls:
+            # LLM decided to call a tool
+            return "tools"
+        
+        # LLM decided to answer directly (No tool call)
+        return "generate_final_answer"
+
+
+    # Decision from the Agent Node routes to Tool Execution, Summary, or Final Answer
+    workflow.add_conditional_edges(
+        "run_agent", 
+        route_agent_decision,
+        {
+            "tools": "tools",  # Route to the ToolNode for execution
+            "generate_final_answer": "generate_final_answer",
+            "summarize": "summarize",
+            END: END,
+        }
+    )
+
+    # Tool Execution routes back to the Agent Node to decide what to do with the tool results
+    workflow.add_edge("tools", "run_agent")
     
-    workflow.add_edge("agent_node", END)
-    workflow.add_edge("make_call","search_web" )
-    workflow.add_edge("make_call","search_pdf")
-
-    workflow.add_edge("search_web", "generate_answer")
-    workflow.add_edge("search_pdf", "generate_answer")
-
-    workflow.add_edge("generate_answer", END)
+    # Final states
+    workflow.add_edge("generate_final_answer", END)
     workflow.add_edge("summarize", END)
     
+    # ... (Rest of the checkpointing logic remains the same)
+    
     # Initialize checkpointing with a robust fallback
-    memory = None
+    # ... (Keep existing checkpointing code here)
+
+    memory = None # Placeholder for memory initialization
+    # ... (Existing SQLite/InMemory setup)
     try:
         # Create a path for the checkpointing database
         checkpoint_dir = os.path.dirname(settings.DATABASES['default']['NAME'])
         checkpoint_db = os.path.join(checkpoint_dir, 'checkpoints.sqlite')
-        
-        # Ensure the directory exists
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Connect to the SQLite database
+        # ... (Rest of SQLite setup)
         conn = sqlite3.connect(checkpoint_db, check_same_thread=False)
         memory = SqliteSaver(conn=conn)
         print("SQLite checkpointing connected successfully.")
     except Exception as e:
-        # from langgraph.checkpoint.memory import InMemorySaver
         print(f"Error connecting to SQLite for checkpointing: {e}. Using in-memory saver.")
-        # memory = InMemorySaver()
+        memory = InMemorySaver()
+
     return workflow.compile(checkpointer=memory)
 
-# Main processing function
-# def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def process_message(message_content: str, conversation_id: str, tenant_id: str, file_path: Optional[str] = None,summarization_request: Optional[str] = None):
@@ -745,6 +785,29 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     # ⚠️ Initialize the tenant-specific, persistent vector store
     tenant_vector_store = initialize_vector_store(tenant_id)
     user_query =message_content
+
+
+    # 1. Create the dynamic pdf_retrieval_tool bound to the tenant's vector store
+    # --- DYNAMIC INITIALIZATION (NEW) ---
+    # 1. Define the PDF retrieval tool (bound to the search_pdf function)
+    pdf_retrieval_tool = Tool(
+        name="search_pdf",
+        description="Useful for answering questions that require information from the tenant's internal knowledge base (PDFs). Always use this tool first for tenant-specific queries. Input should be the user's question.",
+        # func=search_pdf, # The func takes 'state', so we don't need args_schema or Pydantic input here.
+    )
+
+    # 2. Define the Web Search tool (bound to the the search_web function)
+    web_search_tool = Tool(
+        name="search_web",
+        description="Useful for answering general or external knowledge questions that are NOT found in the tenant's internal PDF. Input should be a concise search query.",
+        # func=search_web,
+    )
+    
+    # 3. Create the tools list
+    local_tools = [pdf_retrieval_tool, web_search_tool] 
+
+    # 4. Build the graph with the dynamic tools
+    graph = build_graph(local_tools) # Pass the tools list
    
    
 
@@ -755,7 +818,7 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     # bound_agent_node = partial(agent_node, tools_for_llm=local_tools)
      # 🚨 FIX 4B: Pass BOTH the tool list and the bound node to build_graph
     # graph = build_graph(local_tools, bound_agent_node) 
-    graph = build_graph()
+    # graph = build_graph()
 
     # graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
 
@@ -820,7 +883,7 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
         "messages": [HumanMessage(content=message_content)], 
         "attached_content": attached_content,
         "user_query": user_query,
-        "summarization_request": summarization_request,
+        "summarization_request": "true" if summarization_request else "false", # Ensure string value
         "conversation_id":conversation_id,
         "tenant_config": {
             "greeting": current_tenant.chatbot_greeting,
