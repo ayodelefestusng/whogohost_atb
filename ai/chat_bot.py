@@ -423,13 +423,11 @@ def run_agent(state: State, tools: List[Tool]):
 
     
     # Get the system prompt from tenant config for the agent
-    # We'll use a strong default if it's missing
-    # agent_prompt_template = state["tenant_config"].get("agent_prompt", 
-    #     "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
-    # )
-    agent_prompt_template = "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
-
-    
+   
+   # Get the system prompt from tenant config for the agent
+    agent_prompt_template = state["tenant_config"].get("agent_node_prompt", 
+        "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
+    )
     # Bind the tools and the system prompt to the LLM
     agent_llm = llm.bind_tools(tools=tools).with_config(
         {"tags": ["agent_decision_maker"], "system_message": agent_prompt_template}
@@ -469,12 +467,7 @@ def generate_final_answer_node(state: State):
     messages = state["messages"] 
     tenant_config = state["tenant_config"] 
 
-    # Find the last HumanMessage
-    # user_query = " "
-    # for msg in reversed(messages):
-    #     if isinstance(msg, HumanMessage):
-    #         user_query = msg.content
-    #         break
+
             
     if not user_query:
         user_query = "The user asked an unrecoverable question."
@@ -492,55 +485,26 @@ def generate_final_answer_node(state: State):
     # 🚨 FIX: Ensure prompt is defined and safely formatted
  
     
+        # 🚨 CRITICAL FIX: Use the tenant's prompt and format it correctly
+    default_prompt = """You are a polite, professional AI assistant. Respond to the user's question with the provided context.
+    User Question: {user_query}
+    Context: {context}
+    Return the answer in the required JSON schema."""    
 
-    prompt_template="""You are Damilola, the AI-powered virtual assistant for ATB. Your role is to deliver professional customer service and insightful data analysis, depending on the user's needs.
-
-You operate in two modes:
-1. **Customer Support**: Respond with empathy, clarity, and professionalism. Your goal is to resolve issues, answer questions, and guide users to helpful resources — without technical jargon or internal system references.
-2. **Data Analyst**: Interpret data, explain trends, and offer actionable insights. When visualizations are included, describe what the chart shows and what it means for the user.
-
-Your response must be:
-- **Final**: No follow-up questions or uncertainty.
-- **Clear and Polite**: Use emotionally intelligent language, especially if the user expresses frustration or confusion.
-- **Context-Aware**: Avoid mentioning internal systems (e.g., database names or SQL sources) unless explicitly requested.
-- **Structured**: Always return your answer in the following JSON format.
-
-User Question:
-{user_query}
-
-Available Context:
----
-{context}
----
-
-If the context includes 'Visualization Analysis', describe the chart’s content and implications.
-
-Format your response as a JSON object using this schema (omit 'chart_base64'):
-
-Schema:
-{{
-  "answer": "str: Your clear, concise, and polite response.",
-  "sentiment": "int: An integer rating of the user's sentiment (-2 to +2).",
-  "ticket": "List[str]: Relevant service channels (e.g., 'email', 'live chat', 'support portal'). Empty list if not applicable.",
-  "source": "List[str]: Sources used to generate the answer. Empty list if not applicable."
-}}
-   """
-    
-
-
+    prompt_template = tenant_config.get("final_answer_prompt", default_prompt)
     
     try:
         # Format the final prompt
-        prompt = prompt_template.format(user_query, context)
+        prompt = prompt_template.format(user_query=user_query, context=context)
         prompt = prompt_template
-    except Exception as e:
-        # Fallback if formatting fails (e.g., mismatch in {0}, {1}, etc.)
-        print(f"Error formatting final prompt: {e}. Falling back to default prompt structure.")
-        # Create a safe, guaranteed prompt
-        prompt = (f"User Question: {user_query}\n\nContext: {context}\n\n"
-                  "Please generate a structured answer based on the provided information.")
+
+        
+    except KeyError as e:
+    # Fallback if the user's custom prompt is missing required keys
+        print(f"Error formatting tenant final prompt (missing key: {e}). Falling back to default.")
+        prompt = default_prompt.format(user_query=user_query, context=context)
+        
     # 🚨 FIX END
-    
    
     structured_llm = llm.with_structured_output(Answer)
     final_answer_obj = structured_llm.invoke(prompt)
@@ -747,31 +711,6 @@ def build_graph(tools: List[Tool]):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def process_message(message_content: str, conversation_id: str, tenant_id: str, file_path: Optional[str] = None,summarization_request: Optional[str] = None):
 
     """Main function to process user messages using the LangGraph agent."""
@@ -779,6 +718,8 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     # --- DYNAMIC INITIALIZATION ---
     try:
         current_tenant = Tenant.objects.get(tenant_id=tenant_id)
+
+        
     except Tenant.DoesNotExist:
         return {"answer": "Error: Tenant configuration not found.", "chart": None, "metadata": {}}
 
@@ -805,6 +746,7 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     
     # 3. Create the tools list
     local_tools = [pdf_retrieval_tool, web_search_tool] 
+    persist_directory = os.path.join(settings.BASE_DIR, "chroma_dbs", tenant_id)
 
     # 4. Build the graph with the dynamic tools
     graph = build_graph(local_tools) # Pass the tools list
@@ -826,11 +768,13 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     
     attached_content = None # Simplified for this example
     summarization_request =None
-    if summarization_request:
-        summarization_request="true"
+    
+    if summarization_request and summarization_request.lower() in ['true', '1']:
+        summarization_request_flag = "true"
     else:
-        summarization_request="false"
+        summarization_request_flag = "false"
 
+    
 
 
     # Image processing logic can be added here as in the original code
@@ -877,6 +821,17 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
     elif file_path:
         print(f"Warning: Attached file not found at {file_path}. Skipping image processing.")
     
+
+    tenant_config_dict = {
+        "tenant_id": tenant_id,
+        # Add the path to the config state so search_pdf can access it
+        "vector_store_path": persist_directory, 
+        # Safely read prompts from the model, using model fields instead of hardcoded strings
+        "chatbot_greeting": current_tenant.chatbot_greeting, 
+        "agent_node_prompt": current_tenant.agent_node_prompt,
+        "final_answer_prompt": current_tenant.final_answer_prompt,
+        "summary_prompt": current_tenant.summary_prompt,
+    }
     # initial_state = {"messages": [HumanMessage(content=message_content)], "attached_content": attached_content}
     # Pass the tenant object/prompts/config into the initial state
     initial_state = {
@@ -885,17 +840,7 @@ def process_message(message_content: str, conversation_id: str, tenant_id: str, 
         "user_query": user_query,
         "summarization_request": "true" if summarization_request else "false", # Ensure string value
         "conversation_id":conversation_id,
-        "tenant_config": {
-            "greeting": current_tenant.chatbot_greeting,
-            "agent_prompt": current_tenant.agent_node_prompt,
-            "final_prompt": current_tenant.final_answer_prompt,
-            "summary_prompt": current_tenant.summary_prompt,
-             "vector_store_path": os.path.join(settings.BASE_DIR, "chroma_dbs", tenant_id),
-
-
-
-            
-        }
+        "tenant_config": tenant_config_dict,
     }
     
     output = graph.invoke(initial_state, config)

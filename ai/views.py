@@ -20,7 +20,6 @@ def chatbot(request):
     # Corrected spellings in the request extraction to match the rest of your code
     # tenant_id = request.POST.get('tenamt_id', '').strip() 
     tenant_id = request.POST.get('tenant_id', '').strip()
-    tenant_id = request.POST.get('tenant_id', '').strip()
     tenant_name = request.POST.get('tenant_name', '').strip()
 
     #Onbaording requirments
@@ -28,7 +27,7 @@ def chatbot(request):
     chatbot_greeting = request.POST.get('chat_bot_intro', None) 
     agent_node_prompt = request.POST.get('agent_node_prompt', None)
     tenant_description = request.POST.get('additional_note', None)
-    final_answer_prompt = request.POST.get('final_ouput_prompt', None)
+    final_answer_prompt = request.POST.get('output_prompt', None)
     summary_prompt = request.POST.get('summary_prompt', None)
 
     #Summarisation Request

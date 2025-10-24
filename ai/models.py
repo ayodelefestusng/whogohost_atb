@@ -27,14 +27,24 @@ class Message(models.Model):
     class Meta:
         ordering = ['timestamp']
 
+
+
 class Tenant(models.Model):
     tenant_id = models.IntegerField(primary_key=True)
     tenant_name = models.CharField(max_length=255)
     tenant_kss = models.FileField(upload_to='profiles/', blank=True, null=True)
-    chatbot_greeting = models.TextField()
-    agent_node_prompt = models.TextField()
-    final_answer_prompt = models.TextField()
-    summary_prompt = models.TextField()
+    
+    # --- CRITICAL FIXES: Add defaults or null=True ---
+    chatbot_greeting = models.TextField(default="How can I assist you today?") 
+    agent_node_prompt = models.TextField(
+        default="You are a helpful AI assistant. Use your tools to gather facts before generating a final answer.", 
+        blank=True, 
+        null=True
+    )
+    final_answer_prompt = models.TextField(blank=True, null=True)
+    summary_prompt = models.TextField(blank=True, null=True)
+    # --------------------------------------------------
+    
     is_active=models.BooleanField(default=False)
     tenant_description = models.CharField(max_length=255,blank=True,null=True)
 
