@@ -1,3 +1,4 @@
+from calendar import c
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .chat_bot import process_message
@@ -50,22 +51,30 @@ class ChatbotView(APIView):
     def post(self, request):
         
         print("Chatbot view called")
+        print("GET params:", request.GET)
+        print("POST params:", request.POST)
+        print("FILES:", request.FILES)
         if request.method != 'POST':
             return JsonResponse({'status': 'error', 'response': 'Invalid request method'}, status=405)
 
         # 1. Extract Data
+       
         user_message = request.POST.get('user_message', '').strip()
         conversation_id = request.POST.get('conversation_id', '').strip()
         attachment = request.FILES.get('user_msg_attach', None) 
 
         # Corrected spellings in the request extraction to match the rest of your code
-        # tenant_id = request.POST.get('tenamt_id', '').strip() 
-        # tenant_id = request.POST.get('tenant_id', '').strip()
-        # tenant_name = request.POST.get('tenant_name', '').strip()
+        tenant_id = request.POST.get('tenant_id', '').strip()
+        tenant_name = request.POST.get('tenant_name', '').strip()
+        print ("Request Data:", tenant_name)
+        print("User Message:", user_message)
+        print("Conversation ID:", conversation_id)
+        print("Tenant ID:", tenant_id)
+        print("Tenant Name:", tenant_name)
 
 
-        tenant_id = request.POST.get('tenant_id') or request.GET.get('tenant_id', '')
-        tenant_name = request.POST.get('tenant_name') or request.GET.get('tenant_name', '')
+        # tenant_id = request.POST.get('tenant_id') or request.GET.get('tenant_id', '')
+        # tenant_name = request.POST.get('tenant_name') or request.GET.get('tenant_name', '')
 
         #Onbaording requirments
         tenant_kss_file = request.FILES.get('tenant_profile', None) 
@@ -88,6 +97,7 @@ class ChatbotView(APIView):
 
     # **New Section: Handle Tenant Configuration/Onboarding**
     # This block executes if it's purely a configuration request (no message/summary request)
+        print ("User Message:", user_message, "Summarisation Request:", summarization_request)
         is_onboarding_request = not user_message and not summarization_request
 
         if is_onboarding_request:
@@ -152,6 +162,7 @@ class ChatbotView(APIView):
             # Passed tenant_id to process_message
             bot_response_data = process_message(user_message, conversation_id, tenant_id, file_path,summarization_request)
             bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
+            
         except Exception as e:
             bot_metadata = f"Error processing message: {str(e)}"
             logging.error(f"process_message failed: {e}")
@@ -159,7 +170,7 @@ class ChatbotView(APIView):
         # 7. Craft and Return Response
         response_payload = {
             'status': 'success',
-            'response': bot_metadata,
+            'response':bot_metadata,
             'attachment_url': user_msg_obj.attachment.url if attachment else None
         }
 
@@ -273,6 +284,7 @@ def chatbot2(request):
         # Passed tenant_id to process_message
         bot_response_data = process_message(user_message, conversation_id, tenant_id, file_path,summarization_request)
         bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
+        print ("Bot response Akula:", bot_response_data.get('answer'))
     except Exception as e:
         bot_metadata = f"Error processing message: {str(e)}"
         logging.error(f"process_message failed: {e}")

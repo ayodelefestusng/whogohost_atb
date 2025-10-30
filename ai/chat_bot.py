@@ -22,7 +22,7 @@ import sqlite3
 from datetime import datetime
 from io import BytesIO
 # from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from xml.dom.minidom import Document
 
 from langchain_core.documents import Document
@@ -50,7 +50,8 @@ from langchain_core.tools import Tool  # Explicitly import Tool
 # from langchain_core.output_parsers import JsonOutputParser
 # from langchain_core.vectorstores import InMemoryVectorStore
 # from langchain_community.vectorstores import Chroma # Import Chroma
-from langchain_chroma import Chroma
+# from langchain_chroma import Chroma
+from langchain_community.vectorstores import Chroma
 from langchain_deepseek import \
     ChatDeepSeek  # Import ChatDeepSeek for DeepSeek LLM
 # from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
@@ -69,7 +70,9 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, create_react_agent, tools_condition
 # from matplotlib.ticker import FuncFormatter
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from langchain.vectorstores.base import VectorStore
+
 
 # # ==========================
 # # 🧠 Google Generative AI
@@ -102,11 +105,41 @@ from sqlalchemy import Boolean, create_engine
 from .models import Conversation, Tenant
 
 from langchain_openai import OpenAIEmbeddings
+import logging
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+# Removed any reference to a 'file' handler to avoid configuration errors.
 
+
+# logger = logging.getLogger(__name__)
+logger = logging.getLogger("ayodele")
+
+
+def log_info(msg, tenant_id, conversation_id):
+    logger.info(f"[Tenant: {tenant_id} | Conversation: {conversation_id}] {msg}")
+
+def log_error(msg, tenant_id, conversation_id):
+    logger.error(f"[Tenant: {tenant_id} | Conversation: {conversation_id}] {msg}")
+
+def log_debug(msg, tenant_id, conversation_id):
+    logger.debug(f"[Tenant: {tenant_id} | Conversation: {conversation_id}] {msg}")
+
+def log_warning(msg, tenant_id, conversation_id):
+    logger.warning(f"[Tenant: {tenant_id} | Conversation: {conversation_id}] {msg}")
+
+def log_exception(e, tenant_id, conversation_id):
+    import traceback
+    tb = traceback.format_exc()
+    logger.error(f"[Tenant: {tenant_id} | Conversation: {conversation_id}] Exception: {e}\n{tb}")
+
+from langchain.tools import StructuredTool
+
+# log_info("LangGraph execution started", tenant_id, conversation_id)
+# log_error("Tool failed to return results", tenant_id, conversation_id)
+# log_exception(e, tenant_id, conversation_id)
 
 # ==========================
 # ⚙️ Configuration & Initialization
@@ -143,6 +176,10 @@ tavily_search = TavilySearch(max_results=2)
 #     "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH
 # }
 
+
+
+from langchain_community.vectorstores import FAISS
+
 def safe_json(data):
     """Ensures safe JSON serialization to prevent errors."""
     try:
@@ -166,49 +203,105 @@ model = llm # Consistent naming
 
 # Call the initialization function
 # initialize_vector_store()
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+# embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+
+# Assuming 'settings', 'embeddings', and 'Tenant' are defined elsewhere
+
+import os
+# Assuming necessary imports like Chroma, PyPDFLoader, RecursiveCharacterTextSplitter, etc., are here
+import os
+from langchain_community.vectorstores import FAISS
+# Assuming these imports are defined elsewhere in your file:
+# from your_project.settings import settings
+# from your_project.models import Tenant
+# from your_project.llm_setup import embeddings
+# from langchain_community.document_loaders import PyPDFLoader
+# from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 def initialize_vector_store(tenant_id: str):
-    """Initializes and connects to the Chroma vector store for a specific tenant."""
-    
-    # 1. Define a persistent directory path for the tenant's vector store
-    # This stores the vector data in a dedicated folder (e.g., project_root/chroma_dbs/tenant_123)
-    persist_directory = os.path.join(settings.BASE_DIR, "chroma_dbs", tenant_id)
-    os.makedirs(persist_directory, exist_ok=True)
-    
-    # 2. Connect to the persistent Chroma collection
-    # The collection name can be static, as the directory is tenant-specific
-    
-    vector_store = Chroma(
-        collection_name=f"tenant_{tenant_id}_rag",
-        embedding_function=embeddings, # Your chosen embedding model
-        persist_directory=persist_directory 
-    )
+    """Initializes and connects to the FAISS vector store, loading from disk if available."""
 
-    # 3. Check if the store is empty (i.e., this is the first time loading the PDF)
-    # The actual retrieval/storage logic needs to be moved here, NOT in the global scope.
-    if vector_store._collection.count() == 0:
-        # Load the tenant object here to get the file path
+    # 1. Test embedding model (Keep this)
+    try:
+        test_emb = embeddings.embed_query("Test embedding")
+        print("Test embedding length:", len(test_emb))
+    except Exception as e:
+        print(f"Embedding model failed: {e}")
+        return None 
+
+    # --- Setup Persistence Path and File Checks ---
+    persist_directory = os.path.join(settings.BASE_DIR, "faiss_dbs", tenant_id) # ⚠️ Renamed for clarity
+    faiss_index_path = os.path.join(persist_directory, "index.faiss")
+    
+    
+    # 2. LOAD FROM DISK CHECK (Persistence)
+    if os.path.exists(faiss_index_path):
         try:
-            tenant = Tenant.objects.get(tenant_id=tenant_id)
-            file_path = tenant.tenant_kss.path
-        except (Tenant.DoesNotExist, AttributeError):
-            print("Tenant profile not found or missing path.")
-            return None # Return None if initialization fails
+            print(f"✅ Loading existing FAISS index from disk: {persist_directory}")
+            vector_store = FAISS.load_local(
+                folder_path=persist_directory, 
+                embeddings=embeddings,
+                # Required for loading FAISS indices saved from disk
+                allow_dangerous_deserialization=True 
+            )
+            return vector_store
+        except Exception as e:
+            # Handle corrupted or incompatible index files
+            print(f"⚠️ Warning: Failed to load existing FAISS index ({e}). Re-indexing...")
+            # Fall through to the creation logic below
 
-        if file_path and os.path.exists(file_path):
-            # Load and split PDF logic
+    # --- Document File Retrieval ---
+    try:
+        tenant = Tenant.objects.get(tenant_id=tenant_id)
+        file_path = tenant.tenant_kss.path 
+        print("File Path Ajadi:", file_path)
+    except (Tenant.DoesNotExist, AttributeError):
+        print("Tenant profile not found or missing path. Returning empty store.")
+        # Return an empty FAISS index
+        return FAISS.from_texts([""], embeddings) 
+
+    # --- Create Index (If Load Failed or Index Didn't Exist) ---
+    if file_path and os.path.exists(file_path):
+        try:
+            # --- Document Loading and Splitting ---
             loader = PyPDFLoader(file_path)
             docs = loader.load_and_split(
                 text_splitter=RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             )
-            # Add documents to the persistent store
-            vector_store.add_documents(documents=docs)
-            print(f"PDF loaded and persisted for tenant {tenant_id}.")
-            
-    # 4. Return the initialized, persistent vector store instance
-    return vector_store
 
-# Initialize SQLDatabase with the specified file path
+            valid_docs = [doc for doc in docs if doc.page_content.strip()]
+            print(f"Loaded chunks (total): {len(docs)}")
+            print(f"Valid chunks to embed: {len(valid_docs)}")
+
+            if valid_docs:
+                # 3. CREATE FAISS INDEX (Initial creation)
+                vector_store = FAISS.from_documents(
+                    documents=valid_docs,
+                    embedding=embeddings
+                )
+                print(f"PDF loaded and indexed in FAISS (in-memory) for tenant {tenant_id}.")
+                
+                # 4. 🔥 CRITICAL STEP: SAVE TO DISK
+                os.makedirs(persist_directory, exist_ok=True) # Ensure directory exists
+                vector_store.save_local(
+                    folder_path=persist_directory,
+                    index_name="index" # Saves as index.faiss and index.pkl
+                )
+                print(f"✅ FAISS index successfully saved to disk at {persist_directory}")
+                
+                return vector_store
+            else:
+                print("No valid chunks found to embed.")
+        
+        except Exception as e:
+            print(f"🔴 ERROR during document loading or indexing: {e}")
+            
+    # Fallback return: Create and return an empty FAISS index if loading/indexing failed
+    print("Returning placeholder empty FAISS index.")
+    return FAISS.from_texts([""], embeddings)
+
+
 DB_URI = f"sqlite:///{settings.DATABASES['default']['NAME']}"
 
 # DB_URI = os.getenv("DB_URI")
@@ -240,62 +333,42 @@ class Summary(BaseModel):
     unresolved_tickets: List[str] = Field(description="A list of channels with unresolved issues.")
     all_sources: List[str] = Field(description="All unique sources referenced throughout the conversation.")
 
-# class PDFRetrievalInput(BaseModel):
-#     """Input schema for the pdf_retrieval_tool."""
-#     query: str = Field(description="The user's query to search for within the PDF document.")
-
-# class WebSearchInput(BaseModel):
-#     """Input schema for the tavily_search_tool."""
-#     query: str = Field(description="A concise search query for the web.")
-
-# class SQLQueryInput(BaseModel):
-#     """Input schema for the sql_query_tool."""
-#     query: str = Field(description="The natural language question to be converted into a SQL query.")
-
-# ==========================
-# 📊 State Management (Simplified and Centralized)
-# ==========================
-# class VisualizationInput(BaseModel):
-#     """Input schema for the generate_visualization_tool."""
-#     query: str = Field(description="The user's natural language request for a chart or visualization, e.g., 'Plot the total sales by region'.")
-
 class State(MessagesState):
     """Manages the conversation state. Uses Pydantic models for structured data."""
+
     user_query: str
     attached_content: Optional[str]
 
+    # Core identifiers
+    conversation_id: str
+    tenant_id: str
 
+    # Tenant configuration and vector store
+    tenant_config: Optional[Dict[str, Any]]
+    vector_store_path: Optional[str]  # ✅ ADD THIS LINE
 
+    # vector_store: Optional[VectorStore]
 
-    # Utility 
-    next_node: Optional[str] 
-    vector_store_paths: Optional[List[str]]
-    tenant_config: Optional[Dict[str, Any]] # <-- NEW
-    # vector_store:Optional[Document[str, Any]]
-    # vector_store_path: Optional[Chroma]
-    
-
-    pdf_content: Optional[str] 
-    web_content: Optional[str] 
-    sql_result: Optional[str]
-    # visualization_result: Optional[Dict[str, Any]] = None # <-- NEW
- 
-
-    
+    # Tool outputs
+    pdf_content: Optional[str]
+    web_content: Optional[str]
+   
+    # Final outputs
     final_answer: Optional[Answer]
     conversation_summary: Optional[Summary]
+    metadatas: Optional[Dict[str, Any]]
 
-    # For final logging
-    metadatas: Optional[Dict[str, Any]] 
-
-    
-    
- 
-    # tools_list: Optional[List[Tool]] 
-
+    # Utility
+  
+    next_node: Optional[str]
+    tool_usage_log: Optional[List[str]]  # Optional tracking
+    llm_calls: int
 # ==========================
 # 🛠️ Tools
 # ==========================
+def log_tool_usage(state: State, tool_name: str):
+    state["tool_usage_log"] = state.get("tool_usage_log") or []
+    state["tool_usage_log"].append(tool_name)
 
 def get_time_based_greeting():
     """Return an appropriate greeting based on the current time."""
@@ -303,300 +376,283 @@ def get_time_based_greeting():
     if 5 <= current_hour < 12: return "Good morning"
     if 12 <= current_hour < 17: return "Good afternoon"
     return "Good evening"
+import json
 
+import json
 
-def search_pdf(state: State): 
-# def retrieve_from_pdf(query: str, state: State) -> dict: 
-    """Performs a document query using the bound vector store."""
-    # vector_store = state["vector_store"] 
+from langchain_community.vectorstores import FAISS # Import FAISS
+
+def search_pdf(state: State):
+    """Performs a document query using the pre-initialized FAISS vector store."""
     
-    vector_store_path = state["tenant_config"]["vector_store_path"]
-    # vector_store_path = state["vector_store_paths"]
-
-    print(vector_store_path)
-    if not os.path.exists(vector_store_path):
-        print(f"Vector store path not found for tenant: {vector_store_path}")
-
-        return {"pdf_content": "Error: Vector store path not found."}
-    vector_store = Chroma(
-        persist_directory=vector_store_path,
-        embedding_function=embeddings
-    )
-
-    if vector_store:
+    # Normalize input if it's a string
+    if isinstance(state, str):
         try:
-            ayula=state["messages"][-1].content
-            attached_content=state["attached_content"]
-            user_input = f"User Query:\n{ayula}\n\n:Attached File Content:\n{attached_content}"
-            results = vector_store.similarity_search(user_input, k=3)
-            content = "\n\n".join([doc.page_content for doc in results])
-            return {"pdf_content": content}
-        except Exception as e:
-            # Added better error logging here
-            # print(f"Error during PDF search (Chroma): {e}")
-            print(f"Error during PDF search for tenant at {vector_store_path}: {e}")
-            return {"pdf_content": f"Error: Failed to retrieve from PDF: {e}"}
-            
-    return {"pdf_content": "Error: Document knowledge base not initialized."}
+            state = json.loads(state)
+        except json.JSONDecodeError:
+            return {"pdf_content": "Error: Invalid input format for PDF search."}
 
-# NOTE: pdf_retrieval_tool definition is intentionally REMOVED from global scope 
-# and created dynamically in process_message.
-# pdf_retrieval_tool = Tool(
-#     name="pdf_retrieval_tool",
-#     description="Useful for answering questions from the bank's internal knowledge base (PDFs). Input should be a specific question.",
-#     func=retrieve_from_pdf,
-#     args_schema=PDFRetrievalInput,
-# )
-
-
-def search_web(state: State):  
-        """Perform web search"""
-        
-        try:
-            
-            ayula=state["messages"][-1].content
-            attached_content=state["attached_content"]
-            user_input = f"User Query:\n{ayula}\n\n:Attached File Content:\n{attached_content}"
-           
-            search = TavilySearch(max_results=2)
-            search_docs = search.invoke(input=user_input)
-            # search_docs = tavily_search.invoke(user_input)
-            # print ("Web: Response Type:", search_docs)  # Debug print
-            
-            if any(error in str(search_docs) for error in ["ConnectionError", "HTTPSConnectionPool"]):
-                return {"web_content": ""}
-                
-            formatted_docs = "\n\n---\n\n".join(
-                f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
-                for doc in search_docs['results']
-            )
-            return {"web_content": formatted_docs}
-        except Exception as e:
-            print(f"Web search error: {e}")
-            return {"web_content": ""}
-
-
-pdf_retrieval_tool = Tool(
-    name="search_pdf",
-    description="Useful for answering questions that require information from the tenant's internal knowledge base (PDFs). Always use this tool first for tenant-specific queries. Input should be the user's question.",
-    func=search_pdf,
-)
-
-# 2. Define the Web Search tool (bound to the search_web function)
-web_search_tool = Tool(
-    name="search_web",
-    description="Useful for answering general or external knowledge questions that are NOT found in the tenant's internal PDF. Input should be a concise search query.",
-    func=search_web,
-)
-
-# 3. Create the tools list
-local_tools = [pdf_retrieval_tool, web_search_tool]
-
-# Note: We'll pass these tools into the new agent node function.
-# The graph compilation part below remains the same for now, but we'll update build_graph.
-# We'll modify build_graph to accept this list
-# ...
-# ==========================
-# 🛠️ agent_node function (FIXED)
-# ==========================
-# 🚨 FIX 2: Agent node now accepts the tools list directly as an argument.
-# def agent_node(state: State, tools_for_llm: List[Tool]): 
-
-# Replace your current agent_node function with this:
-
-def run_agent(state: State, tools: List[Tool]):
-    """
-    The Agent Node: Uses the LLM to decide whether to call a tool or generate a final answer.
-    """
-    print("--- LLM AGENT NODE (Decision Maker) ---")
-    messages = state["messages"]
+    tenant_config = state.get("tenant_config", {})
     
-    # Check for initial greeting scenario
-    if len(messages) == 1:
-        # Check if the message is the first one in the conversation
-        if not state.get("summarization_request") == "true":
-             tenant_config = state["tenant_config"] 
-             greeting = tenant_config.get("chatbot_greeting", "Hello! How can I help you?") 
-             new_messages = messages + [AIMessage(content=f"{get_time_based_greeting()}! {greeting}")]
-             # Add a flag to the state to skip further processing
-             return {"messages": new_messages, "next_node": "GREETING_SENT"} 
-
+    user_query = state.get("user_query", "unknown")
+    tenant_id = tenant_config.get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
     
-    # Get the system prompt from tenant config for the agent
-   
-   # Get the system prompt from tenant config for the agent
-    agent_prompt_template = state["tenant_config"].get("agent_node_prompt", 
-        "You are a helpful AI assistant. You have access to a web search and a PDF knowledge base. Use these tools to gather information before generating a final, confident answer. If you have enough information, respond directly without calling any tool."
-    )
-    # Bind the tools and the system prompt to the LLM
-    agent_llm = llm.bind_tools(tools=tools).with_config(
-        {"tags": ["agent_decision_maker"], "system_message": agent_prompt_template}
-    )
-
-    # Invoke the LLM with the message history
-    response = agent_llm.invoke(messages)
-    
-    # Update the state with the LLM's response (which may contain tool_calls)
-    return {"messages": messages + [response]}
-
-
-
-def conditional_rule(state: State) -> str:
-    """Routes the flow based on tool calls or the special greeting flag."""
-    # 🚨 FIX: Handles the 'GREETING_SENT' flag
-    if state.get("next_node") == "END":
-        return END
-    
-    elif state.get("summary_request") == "true":
-        return "generate_summary"
-
-    return "prepare_answer"
-
-def make_call(state: State):
-   pass
-
-
-def generate_final_answer_node(state: State):
-    """
-    The Generator Node: Creates the final structured answer after gathering all necessary context from tools.
-    """
-    print("--- GENERATE FINAL ANSWER NODE ---")
-    user_query = state.get("user_query")
-    # user_query = state["messages"][-1].content
-  
-    messages = state["messages"] 
-    tenant_config = state["tenant_config"] 
-
-
-            
     if not user_query:
-        user_query = "The user asked an unrecoverable question."
-    print("Aleu",user_query)
-  
+        return {"pdf_content": "Error: No query provided for PDF search."}
 
-    
-    context_parts = []
-    if state.get("pdf_content"): context_parts.append(f"PDF Content:\n{state['pdf_content']}")
-    if state.get("web_content"): context_parts.append(f"Web Content:\n{state['web_content']}")
-    if state.get("attached_content"): context_parts.append(f"Attached Content:\n{state['attached_content']}")
-    context = "\n\n".join(context_parts) if context_parts else "No additional context was retrieved."
+    log_info("search_pdf tool invoked", tenant_id, conversation_id)
 
+    # 🚨 NOTE: 'vector_store_path' now refers to the directory where FAISS index files are saved.
+    vector_store_path = state.get("vector_store_path") 
+    print(f"DEBUG: Search Path Loaded: {vector_store_path}")
+    if not vector_store_path:
+        log_error("Missing vector_store_path in state", tenant_id, conversation_id)
+        return {"pdf_content": "Error: Vector store path not provided."}
 
-    # 🚨 FIX: Ensure prompt is defined and safely formatted
- 
-    
-        # 🚨 CRITICAL FIX: Use the tenant's prompt and format it correctly
-    default_prompt = """You are a polite, professional AI assistant. Respond to the user's question with the provided context.
-    User Question: {user_query}
-    Context: {context}
-    Return the answer in the required JSON schema."""    
-
-    prompt_template = tenant_config.get("final_answer_prompt", default_prompt)
-    
     try:
-        # Format the final prompt
-        prompt = prompt_template.format(user_query=user_query, context=context)
-        prompt = prompt_template
+        # 1. LOAD FAISS: Use FAISS.load_local() instead of instantiating Chroma
+        vector_store = FAISS.load_local(
+            folder_path=vector_store_path, 
+            embeddings=embeddings,
+            # This is CRITICAL for loading FAISS indexes saved from a file
+            allow_dangerous_deserialization=True 
+        )
+        
+        # 2. Check Count (FAISS doesn't expose a simple .count(), so we check a known attribute)
+        search_count = vector_store.index.ntotal
+        print(f"Vector Count loaded for search: {search_count}")
 
-        
-    except KeyError as e:
-    # Fallback if the user's custom prompt is missing required keys
-        print(f"Error formatting tenant final prompt (missing key: {e}). Falling back to default.")
+        if search_count == 0:
+             return {"pdf_content": "Error: Vector store loaded successfully but is empty (0 documents)."}
+
+        # 3. Perform Similarity Search (same method signature)
+        results = vector_store.similarity_search(user_query, k=3)
+        content = "\n\n".join([doc.page_content for doc in results])
+        print("Content", content)
+
+        formatted_content = (
+            "--- PDF DOCUMENT CONTEXT START ---\n"
+            f"{content}\n"
+            "--- PDF DOCUMENT CONTEXT END ---"
+        )
+
+        log_debug(f"PDF Search Results:\n{formatted_content}", tenant_id, conversation_id)
+        return {"pdf_content": formatted_content}
+
+    except Exception as e:
+        # This will now catch file-not-found or corrupted index errors
+        log_error(f"PDF search failed: {e}", tenant_id, conversation_id)
+        # log_exception is assumed to be defined elsewhere for full exception logging
+        # log_exception(e, tenant_id, conversation_id) 
+        return {"pdf_content": f"Error: Failed to retrieve from PDF: {e}"}
+    
+
+    
+def search_web(state: State): 
+    """Perform web search using Tavily."""
+    tenant_config = state.get("tenant_config", {})
+
+    tenant_config = state.get("tenant_config", {})
+    tenant_id = tenant_config.get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+    
+
+    log_info("search_web tool invoked", tenant_id, conversation_id)
+    try:
+
+        user_query = state["messages"][-1].content if "messages" in state else state.get("__arg1", "")
+        attached_content = state.get("attached_content", "")
+        query = f"User Query:\n{user_query}\n\nAttached File Content:\n{attached_content}"
+
+        search = TavilySearch(max_results=2)
+        search_docs = search.invoke(input=query)
+
+        if isinstance(search_docs, str):
+            try:
+                search_docs = json.loads(search_docs)
+            except json.JSONDecodeError:
+                log_error("Web search response is not valid JSON", tenant_id, conversation_id)
+                return {"web_content": "Error: Invalid JSON response from web search."}
+
+        if not isinstance(search_docs, dict) or "results" not in search_docs:
+            log_error("Web search response format is unexpected", tenant_id, conversation_id)
+            return {"web_content": "Error: Unexpected response format from web search."}
+
+        formatted_docs = "\n\n---\n\n".join(
+            f'<Document href="{doc["url"]}">\n{doc["content"]}\n</Document>'
+            for doc in search_docs['results']
+        )
+        log_tool_usage(state, "search_web")
+        log_debug(f"Web Search Results:\n{formatted_docs}", tenant_id, conversation_id)
+        return {"web_content": formatted_docs}
+
+    except Exception as e:
+        log_error(f"Web search exception: {e}", tenant_id, conversation_id)
+        return {"web_content": f"Error: Web search failed: {e}"}
+
+
+def landing(state: State) -> str:
+    tenant_id = state["tenant_config"].get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+    log_info("Landing node activated", tenant_id, conversation_id)
+
+    if state.get("summarization_request") == "true":
+        log_info("Routing to summarize", tenant_id, conversation_id)
+        return {"next_node":"summarize"}
+    
+    log_info("Routing to rag", tenant_id, conversation_id)
+    return  {"next_node":"rag"}
+    
+def decide(state: State) -> str:
+    tenant_id = state["tenant_config"].get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+    log_info("Decide node activated", tenant_id, conversation_id)
+
+    if state.get("next_node") == "tsummarizerue":
+        log_info("Routing to summarize", tenant_id, conversation_id)
+        return "summarize"
+    
+    log_info("Routing to rag", tenant_id, conversation_id)
+    return "rag"
+
+def rag(state: State) -> State:
+    tenant_id = state["tenant_config"].get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+    log_info("RAG node activated", tenant_id, conversation_id)
+    log_debug(f"State entering RAG: {state}", tenant_id, conversation_id)
+    return state  # ✅ Return the full state dictionary
+
+
+def generate_final_answer(state: State) -> dict:
+    """Generates the final structured answer using retrieved context and user query."""
+    tenant_config = state["tenant_config"]
+    tenant_id = tenant_config.get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+
+    log_info("Final answer node activated", tenant_id, conversation_id)
+
+    user_query = state.get("user_query")
+    if not user_query:
+        log_warning("Missing user_query — falling back to last human message", tenant_id, conversation_id)
+        user_query = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "The user asked an unrecoverable question.")
+
+    log_debug(f"User query: {user_query}", tenant_id, conversation_id)
+
+    context_parts = []
+    for key, label in [("pdf_content", "PDF Content"), ("web_content", "Web Content"), ("attached_content", "Attached Content")]:
+        if state.get(key):
+            context_parts.append(f"{label}:\n{state[key]}")
+    context = "\n\n".join(context_parts) if context_parts else "No additional context was retrieved."
+    print ("Akdkdk",context)
+    log_debug(f"Context used in prompt:\n{context}", tenant_id, conversation_id)
+
+    default_prompt = (
+        "You are a polite, professional AI assistant. Respond to the user's question with the provided context.\n"
+        "User Question: {user_query}\nContext: {context}\nReturn the answer in the required JSON schema."
+    )
+    prompt_template = tenant_config.get("final_answer_prompt", default_prompt)
+
+    try:
+        prompt = prompt_template.format(user_query=user_query, context=context)
+    except Exception as e:
+        log_error(f"Prompt formatting failed: {e}", tenant_id, conversation_id)
         prompt = default_prompt.format(user_query=user_query, context=context)
-        
-    # 🚨 FIX END
-   
+
     structured_llm = llm.with_structured_output(Answer)
     final_answer_obj = structured_llm.invoke(prompt)
-    
-    # Append the human-readable part of the answer to the message history
+
     new_messages = state["messages"] + [AIMessage(content=final_answer_obj.answer)]
+
     return {
         "final_answer": final_answer_obj,
         "messages": new_messages
     }
 
+
 def summarize_conversation(state: State):
-    print("--- SUMMARIZE CONVERSATION NODE ---")
-    
+    tenant_config = state["tenant_config"]
+    tenant_id = tenant_config.get("tenant_id", "unknown")
+    conversation_id = state.get("conversation_id", "unknown")
+
+    log_info("Summarize node activated", tenant_id, conversation_id)
+
     messages = state.get("messages", [])
-    conversation_id=state.get("conversation_id", "")
-
-    tenant_config = state["tenant_config"] 
-
     if not messages:
+        log_warning("No messages to summarize", tenant_id, conversation_id)
         return {
             "conversation_summary": None,
             "metadatas": {"error": "No messages to summarize."}
         }
 
-    # conversation_history = "\n".join([f"{msg.type}: {msg.content}" for msg in messages])
-    messages = state["messages"]
-    conversation= Conversation.objects.get(conversation_id=conversation_id)
-    conversation_history=conversation.summary
-    len_hist=conversation.message_count
-    rec=len(messages) -len_hist
-    recent_message =state["messages"][-rec]
+    try:
+        conversation = Conversation.objects.get(conversation_id=conversation_id)
+    except Conversation.DoesNotExist:
+        log_error("Conversation not found", tenant_id, conversation_id)
+        return {
+            "conversation_summary": None,
+            "metadatas": {"error": "Conversation not found."}
+        }
 
+    conversation_history = conversation.summary
+    len_hist = conversation.message_count
+    rec = len(messages) - len_hist
 
+    if rec > 0 and rec < len(messages):
+        recent_message = messages[-rec]
+    else:
+        recent_message = messages[-1]
+        log_warning("Fallback to last message due to invalid rec value", tenant_id, conversation_id)
 
-    summarize_prompt_template1=f"""Please provide a structured summary of the following conversation.
-    
-    Summary of Previous Conversation:
-    {conversation_history}
-    Recent Message:{recent_message}
-
-    Provide the output in a JSON format matching this schema:
-    {{
-        "summary": "A concise summary of the entire conversation.",
-        "sentiment": "Overall sentiment score of the conversation (-2 to +2).",
-        "unresolved_tickets": ["List of channels with unresolved issues."],
-        "all_sources": ["All unique sources referenced in the conversation."]
-    }}"""
-
-
-
-
-    
-
-    # 🚨 FIX: Provide a safe, format-ready default template
     summarize_prompt_template = tenant_config.get(
-        "summary_prompt", 
+        "summary_prompt",
         "Summarize the conversation below, determining sentiment and any unresolved issues, using only the structured output schema:\n\nConversation:\n{0}"
-    ) 
+    )
+
     try:
         summarize_prompt = summarize_prompt_template.format(conversation_history)
-        # summarize_prompt=summarize_prompt_template
-  
     except Exception as e:
-        print(f"ERROR: Summary prompt format failed: {e}. Using raw history.")
+        log_error(f"Summary prompt format failed: {e}. Using raw history.", tenant_id, conversation_id)
         summarize_prompt = "Summarize the following raw history: " + conversation_history
-    
-    # ... (rest of the summarize node logic)
+
+    log_debug(f"Summarization prompt:\n{summarize_prompt}", tenant_id, conversation_id)
 
     structured_llm = llm.with_structured_output(Summary)
     summary_obj = structured_llm.invoke(summarize_prompt)
-    
-    # Create the final metadata dictionary for logging
+
+    log_debug(f"Summary result:\n{summary_obj}", tenant_id, conversation_id)
 
     final_answer = state.get("final_answer")
     user_query = state.get("user_query")
-    # for msg in reversed(messages):
-    #     if isinstance(msg, HumanMessage):
-    #         last_user_question = msg.content
-    #         break
-    conversation.message_count=len(messages) 
+
+    conversation.message_count = len(messages)
     conversation.save()
+
+    # Helper to safely extract attributes from dicts or BaseModel-like objects
+    def _get_field(obj, field, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(field, default)
+        # Try attribute access first, then dict() if available
+        value = getattr(obj, field, None)
+        if value is not None:
+            return value
+        try:
+            return obj.dict().get(field, default)
+        except Exception:
+            return default
+
     metadata_dict = {
-        "question": user_query, # Use the robustly found question
-        "answer": final_answer.answer if final_answer else "N/A",
-        "sentiment": final_answer.sentiment if final_answer else 0,
-        "ticket": final_answer.ticket if final_answer else [],
-        "source": final_answer.source if final_answer else [],
-        "summary": summary_obj.summary,
-        "summary_sentiment": summary_obj.sentiment,
-        "summary_unresolved_tickets": summary_obj.unresolved_tickets,
-        "summary_sources": summary_obj.all_sources,
+        "question": user_query,
+        "answer": _get_field(final_answer, "answer", "N/A"),
+        "sentiment": _get_field(final_answer, "sentiment", 0),
+        "ticket": _get_field(final_answer, "ticket", []),
+        "source": _get_field(final_answer, "source", []),
+        "summary": _get_field(summary_obj, "summary", None),
+        "summary_sentiment": _get_field(summary_obj, "sentiment", None),
+        "summary_unresolved_tickets": _get_field(summary_obj, "unresolved_tickets", None),
+        "summary_sources": _get_field(summary_obj, "all_sources", None),
     }
 
     return {
@@ -604,100 +660,39 @@ def summarize_conversation(state: State):
         "metadatas": metadata_dict
     }
 
-# Define the condition to check if a tool was called
-# Define the condition to check if a tool was called
-# def should_continue(state: State) -> str:
-#     """Determines the next step: call a tool or generate the final answer."""
-#     if state["messages"][-1].tool_calls:
-#         return "tools"
-#     return "generate_final_answer"
 
-# ==========================
-# 🔄 Graph Workflow
-# ==========================
-
-# def build_graph(tools_list): # 🚨 FIX: Accepts the dynamic tools list
-
-
-# Main processing function
-# def process_message(message_content: str, session_id: str, tenant_id: str, file_path: Optional[str] = None):
-
-def build_graph(tools: List[Tool]): 
-    """Builds and compiles the LangGraph workflow."""
-    
-    # 1. Define the ToolNode for execution (takes the tools list)
-    tool_node = ToolNode(tools=tools)
+def build_graph(tenant_id: str, conversation_id: str):
+    """Builds and compiles the LangGraph workflow for a given tenant and conversation."""
 
     workflow = StateGraph(State)
-    
-    # 2. Add the nodes
-    # 'run_agent' is the new agent decision-maker
-    workflow.add_node("run_agent", partial(run_agent, tools=tools)) 
-    
-    # 'tools' is the LangGraph ToolNode executor
-    workflow.add_node("tools", tool_node) 
-    
-    # Tool execution nodes (these run inside the ToolNode) are now removed from nodes list: 
-    # workflow.add_node("search_web", search_web)
-    # workflow.add_node("search_pdf", search_pdf)
 
-    workflow.add_node("generate_final_answer", generate_final_answer_node)
+    # --- Nodes ---
+    workflow.add_node("landing", landing)
+    workflow.add_node("decide", decide)
+    workflow.add_node("rag", rag)
+    workflow.add_node("search_pdf", search_pdf)
+    workflow.add_node("search_web", search_web)
+    workflow.add_node("generate_final_answer", generate_final_answer)
     workflow.add_node("summarize", summarize_conversation)
 
-    # 3. Define the Entry Point
-    workflow.set_entry_point("run_agent")
-
-    # 4. Define the Edges
-
-    # Custom function to route from the initial decision maker
-    def route_agent_decision(state: State) -> str:
-        """Determines the next step after the LLM agent runs."""
-        if state.get("next_node") == "GREETING_SENT":
-            return END
-        
-        if state.get("summarization_request") == "true":
-            return "summarize"
-
-        # Check for tool calls made by the LLM (ReAct loop)
-        if state["messages"][-1].tool_calls:
-            # LLM decided to call a tool
-            return "tools"
-        
-        # LLM decided to answer directly (No tool call)
-        return "generate_final_answer"
-
-
-    # Decision from the Agent Node routes to Tool Execution, Summary, or Final Answer
-    workflow.add_conditional_edges(
-        "run_agent", 
-        route_agent_decision,
-        {
-            "tools": "tools",  # Route to the ToolNode for execution
-            "generate_final_answer": "generate_final_answer",
-            "summarize": "summarize",
-            END: END,
-        }
-    )
-
-    # Tool Execution routes back to the Agent Node to decide what to do with the tool results
-    workflow.add_edge("tools", "run_agent")
-    
-    # Final states
+    # --- Routing ---
+    workflow.add_edge(START, "landing")
+    workflow.add_conditional_edges("landing", decide, ["summarize", "rag"])
+    workflow.add_edge("rag", "search_pdf")
+    workflow.add_edge("rag", "search_web")
+    workflow.add_edge("search_pdf", "generate_final_answer")
+    workflow.add_edge("search_web", "generate_final_answer")
     workflow.add_edge("generate_final_answer", END)
     workflow.add_edge("summarize", END)
-    
-    # ... (Rest of the checkpointing logic remains the same)
-    
-    # Initialize checkpointing with a robust fallback
-    # ... (Keep existing checkpointing code here)
 
-    memory = None # Placeholder for memory initialization
-    # ... (Existing SQLite/InMemory setup)
+    # --- Checkpointing ---
+
+
+    # --- Checkpointing Setup ---
+    memory = None
     try:
-        # Create a path for the checkpointing database
         checkpoint_dir = os.path.dirname(settings.DATABASES['default']['NAME'])
         checkpoint_db = os.path.join(checkpoint_dir, 'checkpoints.sqlite')
-        # ... (Rest of SQLite setup)
         conn = sqlite3.connect(checkpoint_db, check_same_thread=False)
         memory = SqliteSaver(conn=conn)
         print("SQLite checkpointing connected successfully.")
@@ -705,163 +700,141 @@ def build_graph(tools: List[Tool]):
         print(f"Error connecting to SQLite for checkpointing: {e}. Using in-memory saver.")
         memory = InMemorySaver()
 
+    log_info("LangGraph workflow compiled successfully", tenant_id, conversation_id)
     return workflow.compile(checkpointer=memory)
 
 
-
-
-
-def process_message(message_content: str, conversation_id: str, tenant_id: str, file_path: Optional[str] = None,summarization_request: Optional[str] = None):
-
+def process_message(
+    message_content: str,
+    conversation_id: str,
+    tenant_id: str,
+    file_path: Optional[str] = None,
+    summarization_request: Optional[str] = None
+):
     """Main function to process user messages using the LangGraph agent."""
 
-    # --- DYNAMIC INITIALIZATION ---
+    log_info("Processing message", tenant_id, conversation_id)
+
+    # --- Tenant Configuration ---
     try:
         current_tenant = Tenant.objects.get(tenant_id=tenant_id)
-
-        
     except Tenant.DoesNotExist:
-        return {"answer": "Error: Tenant configuration not found.", "chart": None, "metadata": {}}
+        log_error("Tenant configuration not found", tenant_id, conversation_id)
+        return {
+            "answer": "Error: Tenant configuration not found.",
+            "chart": None,
+            "metadata": {}
+        }
 
-    # ⚠️ Initialize the tenant-specific, persistent vector store
+    # --- Initialization ---
+    persist_directory = os.path.join(settings.BASE_DIR, "faiss_dbs", tenant_id)
     tenant_vector_store = initialize_vector_store(tenant_id)
-    user_query =message_content
+    tenant_vector_store = initialize_vector_store(tenant_id)
+    print("Vector store initialized.")
+    if tenant_vector_store is not None:
 
-
-    # 1. Create the dynamic pdf_retrieval_tool bound to the tenant's vector store
-    # --- DYNAMIC INITIALIZATION (NEW) ---
-    # 1. Define the PDF retrieval tool (bound to the search_pdf function)
-    pdf_retrieval_tool = Tool(
-        name="search_pdf",
-        description="Useful for answering questions that require information from the tenant's internal knowledge base (PDFs). Always use this tool first for tenant-specific queries. Input should be the user's question.",
-        # func=search_pdf, # The func takes 'state', so we don't need args_schema or Pydantic input here.
-    )
-
-    # 2. Define the Web Search tool (bound to the the search_web function)
-    web_search_tool = Tool(
-        name="search_web",
-        description="Useful for answering general or external knowledge questions that are NOT found in the tenant's internal PDF. Input should be a concise search query.",
-        # func=search_web,
-    )
-    
-    # 3. Create the tools list
-    local_tools = [pdf_retrieval_tool, web_search_tool] 
-    persist_directory = os.path.join(settings.BASE_DIR, "chroma_dbs", tenant_id)
-
-    # 4. Build the graph with the dynamic tools
-    graph = build_graph(local_tools) # Pass the tools list
-   
-   
-
-   
-    # # 3. Create the final tools list to pass to the graph builder
-    # local_tools = [pdf_retrieval_tool_dynamic, tavily_search_tool]
-     # 🚨 FIX 4A: Bind the tools list to the agent_node function
-    # bound_agent_node = partial(agent_node, tools_for_llm=local_tools)
-     # 🚨 FIX 4B: Pass BOTH the tool list and the bound node to build_graph
-    # graph = build_graph(local_tools, bound_agent_node) 
-    # graph = build_graph()
-
-    # graph = build_graph(local_tools) # 🚨 FIX: Pass the dynamic tools list
-
-    config = {"configurable": {"thread_id": conversation_id}}
-    
-    attached_content = None # Simplified for this example
-    summarization_request =None
-    
-    if summarization_request and summarization_request.lower() in ['true', '1']:
-        summarization_request_flag = "true"
+        # Use the correct attribute for FAISS count
+        try:
+            document_count = tenant_vector_store.index.ntotal
+            print("Document count:", document_count)
+        except AttributeError:
+            # Fallback if the object structure is unexpected
+            print("Error: Could not determine document count for FAISS.")
     else:
-        summarization_request_flag = "false"
+        print("Vector store initialization failed; document count unavailable.")
 
     
+    user_query = message_content
+    summarization_flag = str(summarization_request).lower() in ['true', '1']
 
-
-    # Image processing logic can be added here as in the original code
+    # --- Image Processing ---
+    attached_content = None
     if file_path:
         try:
             image = Image.open(file_path)
-            image.thumbnail([512, 512]) # Resize for efficiency
-            
-             # Detect format and set MIME type
-            image_format = image.format.upper()
+            image.thumbnail((512, 512))
+
+            image_format = image.format.upper() if image.format else None
             if image_format not in ["PNG", "JPEG", "JPG"]:
                 raise ValueError(f"Unsupported image format: {image_format}")
 
             mime_type = "jpeg" if image_format in ["JPEG", "JPG"] else "png"
-
-            # Convert image to base64
             buffered = io.BytesIO()
             image.save(buffered, format=image_format)
-            
             img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
             image_uri = f"data:image/{mime_type};base64,{img_str}"
-            
-            if image_uri:
-                # prompt = "Describe the content of the picture in detail."
-                os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-                llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest")
-                
-                prompt = "Generate the message in the content of the picture."
-                message = HumanMessage(
-                content=[
-                {"type": "text", "text": prompt, },
-                { "type": "image_url","image_url": {"url": image_uri}},])
-                # Invoke the model with the message
-                response = llm.invoke([message])
-                # Invoke the model
-                # response = llm.invoke([message])
-                attached_content = response.content
 
-                print("Attached content from image:", attached_content)
+            if GOOGLE_API_KEY:
+                os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+            else:
+                raise ValueError("GOOGLE_API_KEY is not set in environment variables")
+
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest")
+            prompt = "Generate the message in the content of the picture."
+            message = HumanMessage(content=[
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_uri}}
+            ])
+            response = llm.invoke([message])
+            attached_content = response.content
+            log_debug(f"Attached content from image: {attached_content}", tenant_id, conversation_id)
 
         except Exception as e:
-            print(f"Error processing image attachment: {e}")
+            log_error(f"Error processing image attachment: {e}", tenant_id, conversation_id)
             attached_content = f"Error: Could not process attached file ({e})"
-    elif file_path:
-        print(f"Warning: Attached file not found at {file_path}. Skipping image processing.")
-    
 
+    # --- Tenant Config Dictionary ---
     tenant_config_dict = {
         "tenant_id": tenant_id,
-        # Add the path to the config state so search_pdf can access it
-        "vector_store_path": persist_directory, 
-        # Safely read prompts from the model, using model fields instead of hardcoded strings
-        "chatbot_greeting": current_tenant.chatbot_greeting, 
+        "vector_store_path": persist_directory,
+        "chatbot_greeting": current_tenant.chatbot_greeting,
         "agent_node_prompt": current_tenant.agent_node_prompt,
         "final_answer_prompt": current_tenant.final_answer_prompt,
         "summary_prompt": current_tenant.summary_prompt,
+      
     }
-    # initial_state = {"messages": [HumanMessage(content=message_content)], "attached_content": attached_content}
-    # Pass the tenant object/prompts/config into the initial state
+    # --- Initial State ---
     initial_state = {
-        "messages": [HumanMessage(content=message_content)], 
-        "attached_content": attached_content,
-        "user_query": user_query,
-        "summarization_request": "true" if summarization_request else "false", # Ensure string value
-        "conversation_id":conversation_id,
-        "tenant_config": tenant_config_dict,
-    }
-    
-    output = graph.invoke(initial_state, config)
-    print("--- LangGraph workflow completed ---")
-    
-    # Extract final answer from the structured Pydantic object
+    "messages": [HumanMessage(content=message_content)],
+    "attached_content": attached_content,
+    "user_query": user_query,
+    "summarization_request": "true" if summarization_flag else "false",
+    "conversation_id": conversation_id,
+    "tenant_config": tenant_config_dict,
+    "vector_store_path": persist_directory,  # ✅ FIXED
+}
+
+    try:
+        initial_state_obj = State(**initial_state)
+    except ValidationError as e:
+        log_error(f"State validation failed: {e}", tenant_id, conversation_id)
+        raise
+
+    # --- Graph Execution ---
+    graph = build_graph( tenant_id, conversation_id)
+    config = {"configurable": {"thread_id": conversation_id}} # Replace with dynamic thread ID if needed
+
+    try:
+        output = graph.invoke(initial_state_obj, config=config)
+        log_info("LangGraph execution completed successfully", tenant_id, conversation_id)
+    except Exception as e:
+        log_error(f"LangGraph execution failed: {e}", tenant_id, conversation_id)
+        raise
+
+    # --- Final Response ---
     final_answer_obj = output.get('final_answer')
-    final_answer_content = final_answer_obj.answer if final_answer_obj else "No final answer was generated."
     if final_answer_obj:
         return {
-            "answer": final_answer_content,
-            "chart": final_answer_obj.chart_base64, # <-- Pass chart data to the view
+            "answer": final_answer_obj.answer,
+            "chart": final_answer_obj.chart_base64,
             "metadata": output.get("metadatas", {})
         }
-
     else:
-        # Handles cases where the greeting causes the END state without a final_answer object
-        last_message = output.get("messages", [AIMessage(content="Internal error.")] )[-1]
+        last_message = output.get("messages", [AIMessage(content="Internal error.")])[-1]
+        fallback = last_message.content if isinstance(last_message, AIMessage) else str(last_message)
+        log_warning("No final answer object returned. Using fallback message.", tenant_id, conversation_id)
         return {
-            "answer": last_message.content,
+            "answer": fallback,
             "chart": None,
             "metadata": {}
         }
-    
