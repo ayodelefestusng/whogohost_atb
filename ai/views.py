@@ -61,14 +61,17 @@ class ChatbotView(APIView):
             return JsonResponse({'status': 'error', 'response': 'Invalid request method'}, status=405)
 
         # 1. Extract Data
-       
+
+        # Tenant ID (Required)
+        tenant_id = request.POST.get('tenant_id', '').strip()
+        tenant_name = request.POST.get('tenant_name', '').strip()
+
+        # User Message (Optional)
         user_message = request.POST.get('user_message', '').strip()
         conversation_id = request.POST.get('conversation_id', '').strip()
         attachment = request.FILES.get('user_msg_attach', None) 
 
-        # Corrected spellings in the request extraction to match the rest of your code
-        tenant_id = request.POST.get('tenant_id', '').strip()
-        tenant_name = request.POST.get('tenant_name', '').strip()
+     
      
 
         #Onbaording requirments
@@ -86,62 +89,50 @@ class ChatbotView(APIView):
         # 2. Validation
         if not tenant_id or not tenant_name: # Use 'or' for simple check
             return JsonResponse({'status': 'error', 'response': 'Tenant ID and name are required'}, status=400)
+        # 3. Always create/update tenant profile
+        tenant, created = Tenant.objects.get_or_create(tenant_id=tenant_id)
+        tenant.tenant_name = tenant_name
+
+        if tenant_kss_file:
+            try:
+                tenant.tenant_kss = tenant_kss_file
+            except Exception as e:
+                logging.error(f"Failed to read tenant_kss file: {e}")
+                return JsonResponse({'status': 'error', 'response': 'Error processing tenant KSS file'}, status=400)
+
+        if chatbot_greeting:
+            tenant.chatbot_greeting = chatbot_greeting
+        if agent_node_prompt:
+            tenant.agent_node_prompt = agent_node_prompt
+        if final_answer_prompt:
+            tenant.final_answer_prompt = final_answer_prompt
+        if summary_prompt:
+            tenant.summary_prompt = summary_prompt
+        if tenant_description:
+            tenant.tenant_description = tenant_description
+
+        tenant.save()
 
 
-        # ... (Validation for tenant_id and tenant_name)
+        # 4. If no message or summarization, return onboarding success
+        if not user_message and not summarization_request:
+            return JsonResponse({'status': 'success', 'response': 'Tenant profile updated successfully'})
 
-    # **New Section: Handle Tenant Configuration/Onboarding**
-    # This block executes if it's purely a configuration request (no message/summary request)
-        print ("User Message:", user_message, "Summarisation Request:", summarization_request)
-        is_onboarding_request = not user_message and not summarization_request
+        # 5. Validate conversation_id for message/summarization
+        if not conversation_id:
+            return JsonResponse({'status': 'error', 'response': 'Conversation ID is required for message or summarization'}, status=400)
 
-        if is_onboarding_request:
-            tenant, created = Tenant.objects.get_or_create(tenant_id=tenant_id)
-            tenant.tenant_name = tenant_name
-
-            if tenant_kss_file:
-                # Assuming the field on the model is named 'tenant_kss'
-                # NOTE: Your model field should be a TextField if you are doing .read().decode()
-                try:
-                    # tenant.tenant_kss = tenant_kss_file.read().decode('utf-8') 
-                    tenant.tenant_kss = tenant_kss_file
-                except Exception as e:
-                    logging.error(f"Failed to read tenant_kss file: {e}")
-                    return JsonResponse({'status': 'error', 'response': 'Error processing tenant KSS file'}, status=400)
-
-            # Update other fields if they exist in the request
-            if chatbot_greeting:
-                tenant.chatbot_greeting = chatbot_greeting
-            if agent_node_prompt:
-                tenant.agent_node_prompt = agent_node_prompt
-            if final_answer_prompt:
-                tenant.final_answer_prompt = final_answer_prompt
-            if summary_prompt:
-                tenant.summary_prompt = summary_prompt
-            if tenant_description:
-                tenant.tenant_description = tenant_description 
-
-            # Save all updates to the Tenant object
-            tenant.save() 
-        
-            return JsonResponse({'status': 'success', 'response': 'Tenant profile updated successfully'}, )
-
-        # **New Section: Handle Chat/Summarization Request**
-        # This block executes for chat or summarization requests
-        if (user_message or summarization_request) and not conversation_id:
-            return JsonResponse({'status': 'error', 'response': 'conversation id  is required'}, status=400)
-
-        # 4. Conversation & Message Creation  session_id
+        # 6. Conversation & Message Creation
         conversation, _ = Conversation.objects.get_or_create(conversation_id=conversation_id, is_active=True)
 
-        # Create user message
         user_msg_obj = Message.objects.create(
             conversation=conversation,
             text=user_message,
             is_user=True
         )
 
-        # 5. Attachment Handling
+    # 7. Attachment Handling
+ 
         file_path = ""
         if attachment:
             user_msg_obj.attachment = attachment
@@ -152,30 +143,42 @@ class ChatbotView(APIView):
                 logging.warning(f"Could not resolve attachment path: {e}")
                 file_path = ""
 
-        # 6. Call Chatbot Processor
+        # 8. Call Chatbot Processor
+
         try:
             # Passed tenant_id to process_message
             bot_response_data = process_message(user_message, conversation_id, tenant_id, file_path,summarization_request)
             bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
-            yele = bot_response_data.get('final_answer', "I'm sorry, I couldn't process your request.")
-            print (yele)
+            bot_answer = bot_response_data.get('answer', "I'm sorry, I couldn't process your request.")
+           
+
+            if user_message:
+                response = bot_answer
+            elif bot_metadata:
+                response = bot_metadata
+            else:
+                response = bot_response_data.get('answer', bot_metadata)
+
+
+            print ("Bot response Akula:", response)
         except Exception as e:
             bot_metadata = f"Error processing message: {str(e)}"
             logging.error(f"process_message failed: {e}")
 
-        # 7. Craft and Return Response
+        # 9. Craft and Return Response
+
         response_payload = {
             'status': 'success',
-            'response':yele,
-            'attachment_url': user_msg_obj.attachment.url if attachment else None
+            'response': response,
+            'Tenant_id': tenant_id,
+            'conversation_id': conversation_id,
+
+            # 'attachment_url': user_msg_obj.attachment.url if attachment else None
         }
 
-        logging.info(f"Bot response: {bot_metadata}")
-        # return JsonResponse(response_payload)
+        logging.info(f"Bot response: {response} from tenannt_id{tenant_id} for conv_id {conversation_id} ")
+        return JsonResponse(response_payload)
 
-            # Paste your chatbot logic here
-      
-        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 
