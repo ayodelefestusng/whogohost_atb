@@ -1,0 +1,86 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Chatbot API",
+    "version": "1.0.0",
+    "description": "Chatbot endpoint for onboarding, messaging, and summarization"
+  },
+  "paths": {
+    "/chatbot/": {
+      "post": {
+        "summary": "Chatbot interaction",
+        "description": "Handles onboarding, messaging, and summarization requests",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "tenant_name",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "conversation_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user_message": { "type": "string" },
+                  "chat_bot_intro": { "type": "string" },
+                  "agent_node_prompt": { "type": "string" },
+                  "output_prompt": { "type": "string" },
+                  "summary_prompt": { "type": "string" },
+                  "additional_note": { "type": "string" },
+                  "summarisation_request": { "type": "string" },
+                  "user_msg_attach": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "tenant_profile": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "response": { "type": "string" },
+                    "attachment_url": { "type": "string", "nullable": true }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "405": {
+            "description": "Method not allowed"
+          }
+        }
+      }
+    }
+  }
+}

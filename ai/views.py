@@ -17,6 +17,9 @@ from django.utils.decorators import method_decorator
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 
 
+
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class ChatbotView(APIView):
 
@@ -66,15 +69,7 @@ class ChatbotView(APIView):
         # Corrected spellings in the request extraction to match the rest of your code
         tenant_id = request.POST.get('tenant_id', '').strip()
         tenant_name = request.POST.get('tenant_name', '').strip()
-        print ("Request Data:", tenant_name)
-        print("User Message:", user_message)
-        print("Conversation ID:", conversation_id)
-        print("Tenant ID:", tenant_id)
-        print("Tenant Name:", tenant_name)
-
-
-        # tenant_id = request.POST.get('tenant_id') or request.GET.get('tenant_id', '')
-        # tenant_name = request.POST.get('tenant_name') or request.GET.get('tenant_name', '')
+     
 
         #Onbaording requirments
         tenant_kss_file = request.FILES.get('tenant_profile', None) 
@@ -162,7 +157,8 @@ class ChatbotView(APIView):
             # Passed tenant_id to process_message
             bot_response_data = process_message(user_message, conversation_id, tenant_id, file_path,summarization_request)
             bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
-            
+            yele = bot_response_data.get('final_answer', "I'm sorry, I couldn't process your request.")
+            print (yele)
         except Exception as e:
             bot_metadata = f"Error processing message: {str(e)}"
             logging.error(f"process_message failed: {e}")
@@ -170,7 +166,7 @@ class ChatbotView(APIView):
         # 7. Craft and Return Response
         response_payload = {
             'status': 'success',
-            'response':bot_metadata,
+            'response':yele,
             'attachment_url': user_msg_obj.attachment.url if attachment else None
         }
 
@@ -200,7 +196,7 @@ def chatbot2(request):
     tenant_name = request.POST.get('tenant_name', '').strip()
 
     #Onbaording requirments
-    tenant_kss_file = request.FILES.get('tenant_profile', None) 
+    tenant_kss_file = request.FILES.get('tenant_faq', None) 
     chatbot_greeting = request.POST.get('chat_bot_intro', None) 
     agent_node_prompt = request.POST.get('agent_node_prompt', None)
     tenant_description = request.POST.get('additional_note', None)
@@ -234,7 +230,7 @@ def chatbot2(request):
                 tenant.tenant_kss = tenant_kss_file
             except Exception as e:
                 logging.error(f"Failed to read tenant_kss file: {e}")
-                return JsonResponse({'status': 'error', 'response': 'Error processing tenant KSS file'}, status=400)
+                return JsonResponse({'status': 'error', 'response': 'Error processing tenant FAQs file'}, status=400)
 
         # Update other fields if they exist in the request
         if chatbot_greeting:
@@ -251,7 +247,7 @@ def chatbot2(request):
         # Save all updates to the Tenant object
         tenant.save() 
     
-        return JsonResponse({'status': 'success', 'response': 'Tenant profile updated successfully'}, )
+        return JsonResponse({'status': 'success', 'response': 'Tenant profile created/updated successfully'}, )
 
     # **New Section: Handle Chat/Summarization Request**
     # This block executes for chat or summarization requests
@@ -284,7 +280,18 @@ def chatbot2(request):
         # Passed tenant_id to process_message
         bot_response_data = process_message(user_message, conversation_id, tenant_id, file_path,summarization_request)
         bot_metadata = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
-        print ("Bot response Akula:", bot_response_data.get('answer'))
+        bot_answer = bot_response_data.get('metadata', "I'm sorry, I couldn't process your request.")
+        response = ""
+
+        if user_message:
+            response = bot_answer
+        elif bot_metadata:
+            response = bot_metadata
+        else:
+            response = bot_response_data.get('answer', bot_metadata)
+
+
+        print ("Bot response Akula:", response)
     except Exception as e:
         bot_metadata = f"Error processing message: {str(e)}"
         logging.error(f"process_message failed: {e}")
@@ -293,10 +300,13 @@ def chatbot2(request):
     response_payload = {
         'status': 'success',
         'response': bot_metadata,
-        'attachment_url': user_msg_obj.attachment.url if attachment else None
+        'Tenant_id': tenant_id,
+        'conversation_id': conversation_id,
+
+        # 'attachment_url': user_msg_obj.attachment.url if attachment else None
     }
 
-    logging.info(f"Bot response: {bot_metadata}")
+    logging.info(f"Bot response: {response} from tenannt_id{tenant_id} for conv_id {conversation_id} ")
     return JsonResponse(response_payload)
 
 

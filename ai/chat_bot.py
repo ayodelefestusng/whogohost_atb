@@ -324,7 +324,6 @@ class Answer(BaseModel):
     sentiment: int = Field(description="User's sentiment score from -2 (very negative) to +2 (very positive).")
     ticket: List[str] = Field(description="Relevant service channels for unresolved issues (e.g., 'POS', 'ATM').")
     source: List[str] = Field(description="Sources used to generate the answer (e.g., 'PDF Content', 'Web Search').")
-    chart_base64: Optional[str] = Field(default=None, description="A base64 encoded PNG image of the generated chart, if any.")
 
 class Summary(BaseModel):
     """Conversation summary schema."""
@@ -429,7 +428,7 @@ def search_pdf(state: State):
         # 3. Perform Similarity Search (same method signature)
         results = vector_store.similarity_search(user_query, k=3)
         content = "\n\n".join([doc.page_content for doc in results])
-        print("Content", content)
+        # print("Content", content)
 
         formatted_content = (
             "--- PDF DOCUMENT CONTEXT START ---\n"
@@ -544,7 +543,7 @@ def generate_final_answer(state: State) -> dict:
         if state.get(key):
             context_parts.append(f"{label}:\n{state[key]}")
     context = "\n\n".join(context_parts) if context_parts else "No additional context was retrieved."
-    print ("Akdkdk",context)
+   
     log_debug(f"Context used in prompt:\n{context}", tenant_id, conversation_id)
 
     default_prompt = (
@@ -561,6 +560,7 @@ def generate_final_answer(state: State) -> dict:
 
     structured_llm = llm.with_structured_output(Answer)
     final_answer_obj = structured_llm.invoke(prompt)
+    print ("Akdkdk",final_answer_obj)
 
     new_messages = state["messages"] + [AIMessage(content=final_answer_obj.answer)]
 
@@ -729,7 +729,6 @@ def process_message(
     # --- Initialization ---
     persist_directory = os.path.join(settings.BASE_DIR, "faiss_dbs", tenant_id)
     tenant_vector_store = initialize_vector_store(tenant_id)
-    tenant_vector_store = initialize_vector_store(tenant_id)
     print("Vector store initialized.")
     if tenant_vector_store is not None:
 
@@ -826,7 +825,6 @@ def process_message(
     if final_answer_obj:
         return {
             "answer": final_answer_obj.answer,
-            "chart": final_answer_obj.chart_base64,
             "metadata": output.get("metadatas", {})
         }
     else:
