@@ -1,7 +1,7 @@
 # myproject/myapp/urls.py
 from django.urls import path
 
-from .views import chatbot2,chatbot1, ChatbotView
+from .views import chatbot2,chatbot1, ChatbotView,variance,variance_upload_form,hello_json,Onboard,Update,FetchDocument
 
 
 app_name = 'ai'  # ✅ This defines the namespace
@@ -80,14 +80,19 @@ urlpatterns = [
     path('', chatbot2, name='chatbot2'),
     path('chatbot1/', chatbot1, name='chatbot1'),
     path('chatbot/', ChatbotView.as_view(), name='chatbot'),
+    path('onboard/', Onboard.as_view(), name='onboard'),
+    path('update/', Update.as_view(), name='update'),
+    path('fetch/', FetchDocument.as_view(), name='fetch'),
+    
     # Translates text from URL path and returns JSON
     # path('word_translate/', word_translate, name='word_translate'),
     # --- END NEW API ENDPOINTS ---
     #  path('word_process/', word_process, name='word_process'),
 
-    # path('variance/', variance, name='variance'),  # New endpoint for variance calculation
+    path('variance/', variance, name='variance'),  # New endpoint for variance calculation
 
-    # path('variance_upload/', variance_upload_form, name='variance_upload_form'),
+    path('variance_upload/', variance_upload_form, name='variance_upload_form'),
+     path('hello/', hello_json, name='hello_json'),
 
 ]
     # path('variance/', views.variance_view, name='variance')

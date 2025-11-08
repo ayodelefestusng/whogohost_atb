@@ -32,7 +32,8 @@ class Message(models.Model):
 class Tenant(models.Model):
     tenant_id = models.IntegerField(primary_key=True)
     tenant_name = models.CharField(max_length=255)
-    tenant_kss = models.FileField(upload_to='profiles/', blank=True, null=True)
+    tenant_faq = models.FileField(upload_to='profiles/', blank=True, null=True)
+    tenant_mandate = models.FileField(upload_to='mandates/', blank=True, null=True)
     
     # --- CRITICAL FIXES: Add defaults or null=True ---
     chatbot_greeting = models.TextField(default="How can I assist you today?") 
